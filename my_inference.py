@@ -3,35 +3,17 @@ import os
 import numpy as np
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
-import shutil
-import warnings
 import argparse
 import torch
 import yaml
-warnings.simplefilter('ignore')
-
-# load packages
-import random
-from modules.commons import *
 import time
-from Remix.auger import echo_then_reverb_save
+from modules.commons import build_model, load_checkpoint, recursive_munch, str2bool
 import torchaudio
 import librosa
-from modules.commons import str2bool
 from mm4 import preprocess_voice_conversion
 from hf_utils import load_custom_model_from_hf
 
 ########## tools ##########
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
-
 def crossfade(chunk1, chunk2, overlap):
     fade_out = np.cos(np.linspace(0, np.pi / 2, overlap)) ** 2
     fade_in = np.cos(np.linspace(np.pi / 2, 0, overlap)) ** 2
@@ -46,30 +28,49 @@ def load_models_api(args, device=torch.device("cuda")):
     print(f'load model from {dit_checkpoint_path}')
     dit_config_path = args.config
     print(f'load config from {dit_config_path}')
+    with open(dit_config_path, "r") as config_file:
+        config = yaml.safe_load(config_file)
+    model_params = recursive_munch(config["model_params"])
+    spect = config["preprocess_params"]["spect_params"]
+    if (config["preprocess_params"]["sr"], spect["hop_length"], spect["n_mels"],
+            spect["n_fft"], spect["win_length"]) != (44100, 512, 128, 2048, 2048):
+        raise ValueError("The official SVC model requires 44100 Hz, hop 512, 128 mel channels and FFT/window 2048")
+    if not model_params.length_regulator.f0_condition:
+        raise ValueError("The official SVC model requires F0 conditioning")
+    # Reject legacy configurations that request a removed architecture.
+    dit = model_params.DiT
+    lr = model_params.length_regulator
+    if (model_params.get("dit_type", "DiT") != "DiT"
+            or dit.get("final_layer_type", "mlp") != "mlp"
+            or any(dit.get(key, False) for key in
+                   ("is_causal", "long_skip_connection", "time_as_token", "style_as_token", "add_resblock_in_transformer"))
+            or lr.get("is_discrete", False)
+            or lr.get("vector_quantize", False)
+            or lr.get("n_codebooks", 1) != 1):
+        raise ValueError("Unsupported model configuration: only continuous Whisper / non-causal MLP DiT is supported")
+
+    fmax = spect.get("fmax")
+    if fmax == "None":
+        fmax = None
+    fmin = spect.get("fmin", 0)
+    if not isinstance(fmin, (int, float)) or not 0 <= fmin < 22050:
+        raise ValueError("Invalid mel fmin")
+    if fmax is not None and (not isinstance(fmax, (int, float)) or not fmin < fmax <= 22050):
+        raise ValueError("Invalid mel fmax")
+
     # f0 extractor
     from modules.rmvpe import RMVPE
 
-    model_path = load_custom_model_from_hf("lj1995/VoiceConversionWebUI", "rmvpe.pt", None)
+    model_path = load_custom_model_from_hf("lj1995/VoiceConversionWebUI", "rmvpe.pt")
 
     f0_extractor = RMVPE(model_path, is_half=False, device=device)
     f0_fn = f0_extractor.infer_from_audio
 
-    config = yaml.safe_load(open(dit_config_path, "r"))
-    model_params = recursive_munch(config["model_params"])
-    model_params.dit_type = 'DiT'
-    model = build_model(model_params, stage="DiT")
-    hop_length = config["preprocess_params"]["spect_params"]["hop_length"]
+    model = build_model(model_params)
     sr = config["preprocess_params"]["sr"]
 
     # Load checkpoints
-    model, _, _, _ = load_checkpoint(
-        model,
-        None,
-        dit_checkpoint_path,
-        load_only_params=True,
-        ignore_modules=[],
-        is_distributed=False,
-    )
+    model = load_checkpoint(model, dit_checkpoint_path)
 
     for key in model:
         model[key].eval()
@@ -80,7 +81,7 @@ def load_models_api(args, device=torch.device("cuda")):
     from modules.campplus.DTDNN import CAMPPlus
 
     campplus_ckpt_path = load_custom_model_from_hf(
-        "funasr/campplus", "campplus_cn_common.bin", config_filename=None
+        "funasr/campplus", "campplus_cn_common.bin"
     )
 
     campplus_model = CAMPPlus(feat_dim=80, embedding_size=192)
@@ -94,10 +95,10 @@ def load_models_api(args, device=torch.device("cuda")):
         from modules.bigvgan import bigvgan
         bigvgan_name = model_params.vocoder.name
 
-        bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=False)
-
-        #bigvgan_cache is not defined, and hence causing not defined error
-        #bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_cache, use_cuda_kernel=False) 
+        bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_name)
+        if (bigvgan_model.h.sampling_rate, bigvgan_model.h.num_mels,
+                bigvgan_model.h.hop_size) != (sr, spect["n_mels"], spect["hop_length"]):
+            raise ValueError("BigVGAN config does not match the SVC audio configuration")
 
         # remove weight norm in the model and set to eval mode
         bigvgan_model.remove_weight_norm()
@@ -142,8 +143,8 @@ def load_models_api(args, device=torch.device("cuda")):
         "hop_size": config['preprocess_params']['spect_params']['hop_length'],
         "num_mels": config['preprocess_params']['spect_params']['n_mels'],
         "sampling_rate": sr,
-        "fmin": config['preprocess_params']['spect_params'].get('fmin', 0),
-        "fmax": None if config['preprocess_params']['spect_params'].get('fmax', "None") == "None" else 8000,
+        "fmin": fmin,
+        "fmax": fmax,
         "center": False
     }
     from modules.audio import mel_spectrogram
@@ -165,7 +166,8 @@ def load_models_api(args, device=torch.device("cuda")):
 def run_inference(args, model_bundle, device=torch.device("cuda")):
 
     dit_config_path = args.config
-    config = yaml.safe_load(open(dit_config_path, "r"))
+    with open(dit_config_path, "r") as config_file:
+        config = yaml.safe_load(config_file)
 
     # use_style_residual
     use_style_residual = config['model_params']['length_regulator'].get('use_style_residual',False)
@@ -173,7 +175,6 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     model, semantic_fn, f0_fn, vocoder_fn, campplus_model, mel_fn, mel_fn_args = model_bundle
     fp16 = args.fp16
     sr = mel_fn_args['sampling_rate']
-    f0_condition = args.f0_condition
     forch_pitch_shift = args.semi_tone_shift
 
     source = args.source
@@ -188,8 +189,10 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     ref_audio = librosa.load(target_name, sr=sr)[0]
 
 
-    sr = 22050 if not f0_condition else 44100
-    hop_length = 256 if not f0_condition else 512
+    hop_length = mel_fn_args['hop_size']
+    for name, audio in (("source", source_audio), ("reference", ref_audio)):
+        if audio.size < sr // 10 or not np.isfinite(audio).all():
+            raise ValueError(f"{name} audio must be finite and at least 0.1 seconds long")
     max_context_window = sr // hop_length * 30
     overlap_frame_len = 16
     overlap_wave_len = overlap_frame_len * hop_length
@@ -243,46 +246,38 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     feat2 = feat2 - feat2.mean(dim=0, keepdim=True)
     style2 = campplus_model(feat2.unsqueeze(0))
 
-    if f0_condition:
-        F0_ori = f0_fn(ori_waves_16k[0], thred=0.03)
-        F0_alt = f0_fn(converted_waves_16k[0], thred=0.03)
+    F0_ori = f0_fn(ori_waves_16k[0], thred=0.03)
+    F0_alt = f0_fn(converted_waves_16k[0], thred=0.03)
 
-        F0_ori = torch.from_numpy(F0_ori).to(device)[None]
-        F0_alt = torch.from_numpy(F0_alt).to(device)[None]
+    F0_ori = torch.from_numpy(F0_ori).to(device)[None]
+    F0_alt = torch.from_numpy(F0_alt).to(device)[None]
 
-        voiced_F0_ori = F0_ori[F0_ori > 1]
-        voiced_F0_alt = F0_alt[F0_alt > 1]
+    voiced_F0_ori = F0_ori[F0_ori > 1]
+    voiced_F0_alt = F0_alt[F0_alt > 1]
 
-        log_f0_alt = torch.log(F0_alt + 1e-5)
-        shifted_log_f0_alt = log_f0_alt.clone()
-        shifted_f0_alt = torch.exp(shifted_log_f0_alt)
+    log_f0_alt = torch.log(F0_alt + 1e-5)
+    shifted_log_f0_alt = log_f0_alt.clone()
+    shifted_f0_alt = torch.exp(shifted_log_f0_alt)
 
-        # automatic f0 adjust
-        shifted_f0_alt, pitch_shift = preprocess_voice_conversion(
-            voiced_f0_ori=voiced_F0_ori,
-            voiced_f0_alt=voiced_F0_alt,
-            shifted_f0_alt=shifted_f0_alt,
-            enable_adaptive=True,
-            max_shift_semitones=24,
-            forch_pitch_shift = forch_pitch_shift,
-        )
-        print(f'automatic pitch shift {pitch_shift} semi tones')
-
-
-    else:
-        F0_ori = None
-        F0_alt = None
-        shifted_f0_alt = None
+    # automatic f0 adjust
+    shifted_f0_alt, pitch_shift = preprocess_voice_conversion(
+        voiced_f0_ori=voiced_F0_ori,
+        voiced_f0_alt=voiced_F0_alt,
+        shifted_f0_alt=shifted_f0_alt,
+        enable_adaptive=True,
+        max_shift_semitones=24,
+        forch_pitch_shift = forch_pitch_shift,
+    )
+    print(f'automatic pitch shift {pitch_shift} semi tones')
 
 
     # Length regulation
-    cond, _, codes, commitment_loss, codebook_loss, style_cond = model.length_regulator(S_alt, ylens=target_lengths,
-                                                                                       n_quantizers=3,
-                                                                                       f0=shifted_f0_alt, style=style2, return_style_residual=True)
-    prompt_condition, _, codes, commitment_loss, codebook_loss, style_prompt = model.length_regulator(S_ori,
-                                                                                       ylens=target2_lengths,
-                                                                                       n_quantizers=3,
-                                                                                       f0=F0_ori, style=style2, return_style_residual=True)
+    cond, style_cond = model.length_regulator(
+        S_alt, ylens=target_lengths, f0=shifted_f0_alt, style=style2
+    )
+    prompt_condition, style_prompt = model.length_regulator(
+        S_ori, ylens=target2_lengths, f0=F0_ori, style=style2
+    )
 
     max_source_window = max_context_window - mel2.size(2)
     # split source condition (cond) into chunks
@@ -299,11 +294,11 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
             cat_style_cond = torch.cat([style_prompt, chunk_style_cond], dim=1)
         else:
             cat_style_cond=None
-        with torch.autocast(device_type=device.type, dtype=torch.float16 if fp16 else torch.float32):
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=fp16):
             # Voice Conversion
             vc_target = model.cfm.inference(cat_condition,
                                                        torch.LongTensor([cat_condition.size(1)]).to(mel2.device),
-                                                       mel2, style2, None, diffusion_steps,
+                                                        mel2, style2, diffusion_steps,
                                                        inference_cfg_rate=inference_cfg_rate, style_r=cat_style_cond)
 
             vc_target = vc_target[:, :, mel2.size(-1):]
@@ -336,10 +331,7 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     os.makedirs(exp_path, exist_ok=True)
     src_name = os.path.basename(source).split(".")[0]
     tgt_name = os.path.basename(target_name).split(".")[0]
-    if hasattr(args, "uuid"):
-        vc_name = f'{src_name}_{tgt_name}_' + args.uuid + '.wav'
-    else:
-        vc_name = f"{tgt_name}_{src_name}_{pitch_shift}.wav"
+    vc_name = f"{tgt_name}_{src_name}_{pitch_shift}.wav"
     output_path = os.path.join(exp_path, vc_name)
     torchaudio.save(output_path, vc_wave.cpu(), sr)
     return output_path
@@ -347,25 +339,31 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=str)
-    parser.add_argument("--target", type=str)
+    parser.add_argument("--source", type=str, required=True, help="Source vocal audio")
+    parser.add_argument("--target", type=str, required=True, help="Reference singer audio")
     parser.add_argument("--diffusion-steps", type=int, default=30)
-    parser.add_argument("--checkpoint", type=str, help="Path to the checkpoint file")
-    parser.add_argument("--expname", type=str)
-    parser.add_argument("--cuda", type=str)
-    parser.add_argument("--fp16", type=str)
-    parser.add_argument("--accompany", type=str)
-    parser.add_argument("--config", type=str)
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the checkpoint file")
+    parser.add_argument("--expname", type=str, default="inference")
+    parser.add_argument("--cuda", type=int, default=0)
+    parser.add_argument("--fp16", type=str2bool, default=True)
+    parser.add_argument("--config", type=str, default="./configs/YingMusic-SVC.yml")
     args = parser.parse_args()
 
+    if args.diffusion_steps <= 0:
+        parser.error("--diffusion-steps must be greater than zero")
+    for name in ("source", "target", "checkpoint", "config"):
+        if not os.path.isfile(getattr(args, name)):
+            parser.error(f"--{name}: file does not exist: {getattr(args, name)}")
+    if not torch.cuda.is_available():
+        parser.error("CUDA-enabled PyTorch and an NVIDIA GPU are required")
+    if not 0 <= args.cuda < torch.cuda.device_count():
+        parser.error(f"Invalid CUDA device index: {args.cuda}")
     args.cuda = torch.device(f"cuda:{args.cuda}")
-    args.fp16 = str2bool(args.fp16)
     if args.fp16:
         print('Start fp16 to accelerate inference！')
 
     args.length_adjust = 1.0
     args.inference_cfg_rate = 0.7
-    args.f0_condition = True
     args.semi_tone_shift = None    # If None, the tone is automatically sandhi
 
     args.output = './outputs'
@@ -373,9 +371,4 @@ if __name__ == "__main__":
 
     models = load_models_api(args, device=args.cuda)
     vc = run_inference(args, models, device=args.cuda)
-    if args.accompany:
-        vc_t = vc.split('/')
-        a,b = '/'.join(vc_t[:-1]), vc_t[-1]
-        os.makedirs(a + '/accompany', exist_ok=True)
-        op = a + '/accompany/'+b
-        echo_then_reverb_save(vc,op,args.accompany)
+    print(f"Saved converted vocal: {vc}")

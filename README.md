@@ -1,175 +1,55 @@
-# YingMusic-SVC: Real-World Robust Zero-Shot Singing Voice Conversion with Flow-GRPO and Singing-Specific Inductive Biases
+# YingMusic-SVC — CLI inference
 
----
+Zero-shot singing voice conversion: convert a source vocal to the timbre of a reference singer while preserving the lyrics and melody. This repository contains only the SVC command-line inference implementation.
 
-<div align="center">
+Original project: [GiantAILab/YingMusic-SVC](https://github.com/GiantAILab/YingMusic-SVC) · [Paper](https://arxiv.org/abs/2512.04793) · [Model weights](https://huggingface.co/GiantAILab/YingMusic-SVC).
 
-[![Paper](https://img.shields.io/badge/Paper-YingMusic--SVC-blue)](https://arxiv.org/abs/2512.04793)
-[![Hugging Face](https://img.shields.io/badge/🤗%20HuggingFace-YingMusic--SVC-yellow)](https://huggingface.co/GiantAILab/YingMusic-SVC)
-[![ModelScope](https://img.shields.io/badge/🔮%20ModelScope-YingMusic--SVC-purple)](https://www.modelscope.cn/models/giantailab/YingMusic-SVC/)
-[![Demo Page](https://img.shields.io/badge/🎧%20Demo%20Page-YingMusic--SVC-brightgreen)](https://giantailab.github.io/YingMusic-SVC)
+## Installation
 
-
-
-[//]: # ([![Hugging Face]&#40;https://img.shields.io/badge/Demo-YingMusic--SVC-green&#41;]&#40;&#41;)
-
-</div>
-
----
-
-## Overview ✨
-
-<p align="center">
-  <img src="figs/head.jpeg" width="720" alt="pipeline">
-</p>
-
-Singing voice conversion (SVC) aims to render the target singer’s timbre while preserving melody and lyrics. However, existing zero-shot SVC systems remain fragile in real songs due to harmony interference, F0 errors, and the lack of inductive biases for singing.
-We propose **YingMusic-SVC**, a robust zero-shot framework that unifies continuous pre-training, robust supervised fine-tuning, and Flow-GRPO reinforcement learning. Our model introduces a singing-trained RVC timbre shifter for timbre–content disentanglement, an F0-aware timbre adaptor for dynamic vocal expression, and an energy-balanced rectified flow matching loss to enhance high-frequency fidelity.
-Experiments on a graded multi-track benchmark show that YingMusic-SVC achieves consistent improvements over strong open-source baselines in timbre similarity, intelligibility, and perceptual naturalness—especially under accompanied and harmony-contaminated conditions—demonstrating its effectiveness for real-world SVC deployment.
-
-### 🔧 Key Features  
-- **Three‑Stage Training Pipeline**  
-  - **CPT**: Continuous Pre-Training with singing‑trained modules  
-  - **SFT**: Robust Supervised Fine-Tuning with *F0 perturbation* & *harmony augmentation*  
-  - **RL (Flow‑GRPO)**: Multi-reward reinforcement learning for perceptual quality  
-
-- **Singing-Specific Inductive Biases**  
-  - 🎼 **RVC-based Timbre Shifter** (trained on 120 singers)  
-  - 🎚️ **F0‑Aware Fine-Grained Timbre Adaptor**  
-  - 🔊 **Energy-balanced Flow Matching Loss** (enhanced high-frequency details)
-
----
-
-
-<p align="center">
-  <img src="figs/svc_main.jpg" width="720" alt="pipeline">
-</p>
-
----
-
-## News & Updates 🗞️
-- **2025-11-26**: Released our accompany separator inference CLI and model ckpt
-- **2025-11-26**: Released gradio app for easy try    
-- **2025-11-25**: Released technical report
-- **2025-11-25**: Initial YingMusic-SVC inference CLI  
-- **2025-11-25**: Released model checkpoint  
-- **2025-11-25**: Released multi-track benchmark
-
----
-
-## Installation 🛠️
+Use Python 3.10 and an NVIDIA GPU with a compatible CUDA-enabled PyTorch installation.
 
 ```bash
-git clone https://github.com/GiantAILab/YingMusic-SVC.git
+git clone https://github.com/hanruijiang/YingMusic-SVC.git
 cd YingMusic-SVC
 
 conda create -n ymsvc python=3.10
 conda activate ymsvc
+# Example: PyTorch 2.4.0 with CUDA 12.1; choose a wheel compatible with your driver.
+pip install torch==2.4.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
-
-# install ffmpeg & sox
-sudo apt update
-sudo apt install -y sox libsox-fmt-all
-sudo apt install -y ffmpeg
 ```
 
----
+For compressed audio formats, install FFmpeg if your audio backend requires it. WAV inputs are recommended.
 
-## Quick Start 🚀
+## Checkpoint
 
-### 1. **accompany separation**
-
+Download [YingMusic-SVC-full.pt](https://huggingface.co/GiantAILab/YingMusic-SVC/blob/main/YingMusic-SVC-full.pt) into `checkpoints/`:
 
 ```bash
-
-cd accom_separation
-bash infer.sh
-
+mkdir -p checkpoints
+huggingface-cli download GiantAILab/YingMusic-SVC YingMusic-SVC-full.pt --local-dir checkpoints
 ```
 
-### 2. **SVC Inference**
+RMVPE, CAMPPlus, Whisper and BigVGAN weights are downloaded automatically from Hugging Face on first use. Use trusted checkpoints only. All required SVC state-dict entries must load successfully.
+
+## Inference
+
+Run from the repository root. Provide an isolated source vocal and a reference vocal; the reference is truncated to 25 seconds internally. Inputs must be finite and at least 0.1 seconds long. The configuration supports the official 44.1 kHz, 128-mel, 512-hop SVC model only; other model architectures, CPU inference and accompaniment separation are not supported.
 
 ```bash
-bash my_infer.sh
+python my_inference.py \
+    --source path/to/source_vocal.wav \
+    --target path/to/reference_vocal.wav \
+    --checkpoint checkpoints/YingMusic-SVC-full.pt \
+    --config configs/YingMusic-SVC.yml \
+    --diffusion-steps 100 \
+    --cuda 0 \
+    --fp16 True \
+    --expname example
 ```
 
-### 3. **Gradio APP**
+The converted 44.1 kHz vocal WAV is saved under `outputs/example/`. `--fp16 False` disables DiT autocast; Whisper still uses FP16. Use `--help` to list arguments, or edit the paths in `my_infer.sh` and run `bash my_infer.sh`.
 
-```bash
-python gradio_app.py
-```
----
+## Acknowledgements and license
 
-## Benchmark Datasets 📚
-
-We provide a **graded difficulty benchmark**, derived from 100+ multi-track studio songs:
-
-[🤗 Download](https://huggingface.co/datasets/GiantAILab/YingMusic-SVC_Difficulty-Graded_Benchmark)
-[🔮 Download](https://www.modelscope.cn/datasets/giantailab/YingMusic-SVC_Difficulty-Graded_Benchmark)
-
-| Level | Description |
-|-------|-------------|
-| **GT Leading** | Clean studio lead vocals |
-| **Mix Vocal** | Lead + harmony contamination |
-| **Ours Leading** | Extracted via our Band RoFormer separator |
-
-
----
-
-## Pretrained Models 🧪
-
-| Model              | Description                     | Link |
-|--------------------|--------------------------------|------|
-| **YingMusic-SVC-full** | RL-enhanced final model         | [![Hugging Face](https://img.shields.io/badge/🤗%20HuggingFace-YingMusic--SVC--Full-yellow)](https://huggingface.co/GiantAILab/YingMusic-SVC/blob/main/YingMusic-SVC-full.pt) |
-| **our BR separator** | Our accompany separation model | [![Hugging Face](https://img.shields.io/badge/🤗%20HuggingFace-BR--separator-yellow)](https://huggingface.co/GiantAILab/YingMusic-SVC/blob/main/bs_roformer.ckpt) |
-
-
----
-
-## Development Roadmap & TODO 🗺️
-- [x] our stem-separator inference CLI & model ckpt
-- [x] develop gradio app for YingMusic-SVC
-- [ ] benchmark one-click eval script
-
----
-
-## Acknowledgements 🙏  
-
-This project is built upon:
-
-- [Seed-VC](https://github.com/Plachtaa/seed-vc)
-
-[//]: # (- BigVGAN Vocoder  )
-
-[//]: # ()
-[//]: # (---)
-
-[//]: # ()
-[//]: # ()
-
-
-## Star 🌟 History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=GiantAILab/YingMusic-SVC&type=date&legend=top-left)](https://www.star-history.com/#GiantAILab/YingMusic-SVC&type=date&legend=top-left)
-
-
-## Citation 🧾
-
-
-If you use YingMusic‑SVC for research, please cite:
-
-```
-
-@article{chen2025yingmusicsvc,
-  title={YingMusic-SVC: Real-World Robust Zero-Shot Singing Voice Conversion with Flow-GRPO and Singing-Specific Inductive Biases},
-  author={Chen, Gongyu and Zhang, Xiaoyu and Weng, Zhenqiang and Zheng, Junjie and Shen, Da and Ding, Chaofan and Zhang, Wei-Qiang and Chen, Zihao},
-  journal={arXiv preprint arXiv:2512.04793},
-  year={2025}
-}
-
-```
-
----
-
-## License 📝  
-Our code is released under MIT License.
+Based on [YingMusic-SVC](https://github.com/GiantAILab/YingMusic-SVC) and [Seed-VC](https://github.com/Plachtaa/seed-vc). See [LICENSE.txt](LICENSE.txt) for the MIT license. If using the model in research, please cite the [original paper](https://arxiv.org/abs/2512.04793).

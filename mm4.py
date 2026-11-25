@@ -1,15 +1,5 @@
-import os
-os.environ["HF_HUB_CACHE"] = "./checkpoints/hf_cache"
-
-import argparse
-import time
-from pathlib import Path
-
-import librosa
 import numpy as np
-import soundfile as sf
 import torch
-import yaml
 
 
 def calculate_semitone_shift(source_f0, reference_f0):
@@ -30,7 +20,7 @@ def calculate_semitone_shift(source_f0, reference_f0):
 
     mean_log_diff = np.mean(log_ref) - np.mean(log_src)
 
-    return 12 * mean_log_diff / np.log(2)  # Removed the +4.5 offset
+    return 12 * mean_log_diff / np.log(2)
 
 
 def get_f0_statistics(f0_sequence):
@@ -40,15 +30,9 @@ def get_f0_statistics(f0_sequence):
 
     valid_f0 = f0_sequence[f0_sequence > 1]
     if len(valid_f0) == 0:
-        return {"mean": 0, "median": 0, "std": 0, "min": 0, "max": 0}
+        return {"mean": 0}
 
-    return {
-        "mean": np.mean(valid_f0),
-        "median": np.median(valid_f0),
-        "std": np.std(valid_f0),
-        "min": np.min(valid_f0),
-        "max": np.max(valid_f0),
-    }
+    return {"mean": np.mean(valid_f0)}
 
 
 def adaptive_pitch_shift_factor(voiced_f0_ori, low_threshold=120, high_threshold=205, min_factor=0.3, max_factor=1.0):
@@ -80,7 +64,6 @@ def adaptive_pitch_shift_factor(voiced_f0_ori, low_threshold=120, high_threshold
     # For low F0 (typically male voices), allow more pitch shift
     elif mean_f0 < low_threshold:
         # Gradual increase as F0 decreases
-        # factor = min(max_factor, max_factor + (low_threshold - mean_f0) / low_threshold * 0.8)
         factor = max_factor - (low_threshold - mean_f0) / low_threshold * 1.2  # * 0.8
 
     else:
@@ -150,8 +133,3 @@ def preprocess_voice_conversion(
 
 
     return final_f0_alt, pitch_shift
-
-
-
-
-
