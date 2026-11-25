@@ -21,11 +21,13 @@ def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin,
     if torch.max(y) > 1.0:
         print("max value is ", torch.max(y))
 
-    global mel_basis, hann_window  # pylint: disable=global-statement
-    if f"{str(sampling_rate)}_{str(fmax)}_{str(y.device)}" not in mel_basis:
+    mel_key = (sampling_rate, n_fft, num_mels, fmin, fmax, y.device)
+    window_key = (win_size, y.device)
+    if mel_key not in mel_basis:
         mel = librosa_mel_fn(sr=sampling_rate, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax)
-        mel_basis[str(sampling_rate) + "_" + str(fmax) + "_" + str(y.device)] = torch.from_numpy(mel).float().to(y.device)
-        hann_window[str(sampling_rate) + "_" + str(y.device)] = torch.hann_window(win_size).to(y.device)
+        mel_basis[mel_key] = torch.from_numpy(mel).float().to(y.device)
+    if window_key not in hann_window:
+        hann_window[window_key] = torch.hann_window(win_size, device=y.device)
 
     y = torch.nn.functional.pad(
         y.unsqueeze(1), (int((n_fft - hop_size) / 2), int((n_fft - hop_size) / 2)), mode="reflect"
@@ -38,7 +40,7 @@ def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin,
             n_fft,
             hop_length=hop_size,
             win_length=win_size,
-            window=hann_window[str(sampling_rate) + "_" + str(y.device)],
+            window=hann_window[window_key],
             center=center,
             pad_mode="reflect",
             normalized=False,
@@ -49,7 +51,7 @@ def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin,
 
     spec = torch.sqrt(spec.pow(2).sum(-1) + (1e-9))
 
-    spec = torch.matmul(mel_basis[str(sampling_rate) + "_" + str(fmax) + "_" + str(y.device)], spec)
+    spec = torch.matmul(mel_basis[mel_key], spec)
     spec = spectral_normalize_torch(spec)
 
     return spec

@@ -255,15 +255,11 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     voiced_F0_ori = F0_ori[F0_ori > 1]
     voiced_F0_alt = F0_alt[F0_alt > 1]
 
-    log_f0_alt = torch.log(F0_alt + 1e-5)
-    shifted_log_f0_alt = log_f0_alt.clone()
-    shifted_f0_alt = torch.exp(shifted_log_f0_alt)
-
     # automatic f0 adjust
     shifted_f0_alt, pitch_shift = preprocess_voice_conversion(
         voiced_f0_ori=voiced_F0_ori,
         voiced_f0_alt=voiced_F0_alt,
-        shifted_f0_alt=shifted_f0_alt,
+        shifted_f0_alt=F0_alt,
         enable_adaptive=True,
         max_shift_semitones=24,
         forch_pitch_shift = forch_pitch_shift,
@@ -329,8 +325,8 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     time_vc_end = time.time()
     print(f"RTF: {(time_vc_end - time_vc_start) / vc_wave.size(-1) * sr}")
     os.makedirs(exp_path, exist_ok=True)
-    src_name = os.path.basename(source).split(".")[0]
-    tgt_name = os.path.basename(target_name).split(".")[0]
+    src_name = os.path.splitext(os.path.basename(source))[0]
+    tgt_name = os.path.splitext(os.path.basename(target_name))[0]
     vc_name = f"{tgt_name}_{src_name}_{pitch_shift}.wav"
     output_path = os.path.join(exp_path, vc_name)
     torchaudio.save(output_path, vc_wave.cpu(), sr)
