@@ -6,7 +6,6 @@
 
 import os
 import json
-from pathlib import Path
 from typing import Optional, Union, Dict
 
 import torch
@@ -30,7 +29,7 @@ def load_hparams_from_json(path) -> AttrDict:
 
 class AMPBlock1(torch.nn.Module):
     """
-    AMPBlock applies Snake / SnakeBeta activation functions with trainable parameters that control periodicity, defined for each layer.
+    AMPBlock applies SnakeBeta activation functions with trainable parameters that control periodicity, defined for each layer.
     AMPBlock1 has additional self.convs2 that contains additional Conv1d layers with a fixed dilation=1 followed by each layer in self.convs1
 
     Args:
@@ -38,7 +37,6 @@ class AMPBlock1(torch.nn.Module):
         channels (int): Number of convolution channels.
         kernel_size (int): Size of the convolution kernel. Default is 3.
         dilation (tuple): Dilation rates for the convolutions. Each dilation layer has two convolutions. Default is (1, 3, 5).
-        activation (str): Activation function type. Should be either 'snake' or 'snakebeta'. Default is None.
     """
 
     def __init__(
@@ -47,11 +45,8 @@ class AMPBlock1(torch.nn.Module):
             channels: int,
             kernel_size: int = 3,
             dilation: tuple = (1, 3, 5),
-            activation: str = None,
     ):
         super().__init__()
-
-        self.h = h
 
         self.convs1 = nn.ModuleList(
             [
@@ -91,35 +86,16 @@ class AMPBlock1(torch.nn.Module):
             self.convs2
         )  # Total number of conv layers
 
-        Activation1d = TorchActivation1d
-
-        # Activation functions
-        if activation == "snake":
-            self.activations = nn.ModuleList(
-                [
-                    Activation1d(
-                        activation=activations.Snake(
-                            channels, alpha_logscale=h.snake_logscale
-                        )
+        self.activations = nn.ModuleList(
+            [
+                TorchActivation1d(
+                    activation=activations.SnakeBeta(
+                        channels, alpha_logscale=h.snake_logscale
                     )
-                    for _ in range(self.num_layers)
-                ]
-            )
-        elif activation == "snakebeta":
-            self.activations = nn.ModuleList(
-                [
-                    Activation1d(
-                        activation=activations.SnakeBeta(
-                            channels, alpha_logscale=h.snake_logscale
-                        )
-                    )
-                    for _ in range(self.num_layers)
-                ]
-            )
-        else:
-            raise NotImplementedError(
-                "activation incorrectly specified. check the config file and look for 'activation'."
-            )
+                )
+                for _ in range(self.num_layers)
+            ]
+        )
 
     def forward(self, x):
         acts1, acts2 = self.activations[::2], self.activations[1::2]
@@ -139,91 +115,6 @@ class AMPBlock1(torch.nn.Module):
             remove_weight_norm(l)
 
 
-class AMPBlock2(torch.nn.Module):
-    """
-    AMPBlock applies Snake / SnakeBeta activation functions with trainable parameters that control periodicity, defined for each layer.
-    Unlike AMPBlock1, AMPBlock2 does not contain extra Conv1d layers with fixed dilation=1
-
-    Args:
-        h (AttrDict): Hyperparameters.
-        channels (int): Number of convolution channels.
-        kernel_size (int): Size of the convolution kernel. Default is 3.
-        dilation (tuple): Dilation rates for the convolutions. Each dilation layer has two convolutions. Default is (1, 3, 5).
-        activation (str): Activation function type. Should be either 'snake' or 'snakebeta'. Default is None.
-    """
-
-    def __init__(
-            self,
-            h: AttrDict,
-            channels: int,
-            kernel_size: int = 3,
-            dilation: tuple = (1, 3, 5),
-            activation: str = None,
-    ):
-        super().__init__()
-
-        self.h = h
-
-        self.convs = nn.ModuleList(
-            [
-                weight_norm(
-                    Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        stride=1,
-                        dilation=d,
-                        padding=get_padding(kernel_size, d),
-                    )
-                )
-                for d in dilation
-            ]
-        )
-        self.convs.apply(init_weights)
-
-        self.num_layers = len(self.convs)  # Total number of conv layers
-
-        Activation1d = TorchActivation1d
-
-        # Activation functions
-        if activation == "snake":
-            self.activations = nn.ModuleList(
-                [
-                    Activation1d(
-                        activation=activations.Snake(
-                            channels, alpha_logscale=h.snake_logscale
-                        )
-                    )
-                    for _ in range(self.num_layers)
-                ]
-            )
-        elif activation == "snakebeta":
-            self.activations = nn.ModuleList(
-                [
-                    Activation1d(
-                        activation=activations.SnakeBeta(
-                            channels, alpha_logscale=h.snake_logscale
-                        )
-                    )
-                    for _ in range(self.num_layers)
-                ]
-            )
-        else:
-            raise NotImplementedError(
-                "activation incorrectly specified. check the config file and look for 'activation'."
-            )
-
-    def forward(self, x):
-        for c, a in zip(self.convs, self.activations):
-            xt = a(x)
-            xt = c(xt)
-            x = xt + x
-
-    def remove_weight_norm(self):
-        for l in self.convs:
-            remove_weight_norm(l)
-
-
 class BigVGAN(
     torch.nn.Module,
     PyTorchModelHubMixin,
@@ -240,14 +131,12 @@ class BigVGAN(
     Args:
         h (AttrDict): Hyperparameters.
     Note:
-        - Ensure that the activation function is correctly specified in the hyperparameters (h.activation).
+        - Uses SnakeBeta activation.
     """
 
     def __init__(self, h: AttrDict):
         super().__init__()
         self.h = h
-
-        Activation1d = TorchActivation1d
 
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
@@ -257,15 +146,8 @@ class BigVGAN(
             Conv1d(h.num_mels, h.upsample_initial_channel, 7, 1, padding=3)
         )
 
-        # Define which AMPBlock to use. BigVGAN uses AMPBlock1 as default
-        if h.resblock == "1":
-            resblock_class = AMPBlock1
-        elif h.resblock == "2":
-            resblock_class = AMPBlock2
-        else:
-            raise ValueError(
-                f"Incorrect resblock class specified in hyperparameters. Got {h.resblock}"
-            )
+        if h.resblock != "1" or h.activation != "snakebeta":
+            raise ValueError("BigVGAN requires resblock 1 and SnakeBeta activation")
 
         # Transposed conv-based upsamplers. does not apply anti-aliasing
         self.ups = nn.ModuleList()
@@ -294,30 +176,14 @@ class BigVGAN(
                     zip(h.resblock_kernel_sizes, h.resblock_dilation_sizes)
             ):
                 self.resblocks.append(
-                    resblock_class(h, ch, k, d, activation=h.activation)
+                    AMPBlock1(h, ch, k, d)
                 )
 
-        # Post-conv
-        activation_post = (
-            activations.Snake(ch, alpha_logscale=h.snake_logscale)
-            if h.activation == "snake"
-            else (
-                activations.SnakeBeta(ch, alpha_logscale=h.snake_logscale)
-                if h.activation == "snakebeta"
-                else None
-            )
+        self.activation_post = TorchActivation1d(
+            activation=activations.SnakeBeta(ch, alpha_logscale=h.snake_logscale)
         )
-        if activation_post is None:
-            raise NotImplementedError(
-                "activation incorrectly specified. check the config file and look for 'activation'."
-            )
-
-        self.activation_post = Activation1d(activation=activation_post)
-
-        # Whether to use bias for the final conv_post. Default to True for backward compatibility
-        self.use_bias_at_final = h.get("use_bias_at_final", True)
         self.conv_post = weight_norm(
-            Conv1d(ch, 1, 7, 1, padding=3, bias=self.use_bias_at_final)
+            Conv1d(ch, 1, 7, 1, padding=3, bias=h.use_bias_at_final)
         )
 
         # Weight initialization
@@ -325,8 +191,7 @@ class BigVGAN(
             self.ups[i].apply(init_weights)
         self.conv_post.apply(init_weights)
 
-        # Final tanh activation. Defaults to True for backward compatibility
-        self.use_tanh_at_final = h.get("use_tanh_at_final", True)
+        self.use_tanh_at_final = h.use_tanh_at_final
 
     def forward(self, x):
         # Pre-conv
@@ -367,19 +232,7 @@ class BigVGAN(
             remove_weight_norm(self.conv_pre)
             remove_weight_norm(self.conv_post)
         except ValueError:
-            print("[INFO] Model already removed weight norm. Skipping!")
             pass
-
-    # Additional methods for huggingface_hub support
-    def _save_pretrained(self, save_directory: Path) -> None:
-        """Save weights and config.json from a Pytorch model to a local directory."""
-
-        model_path = save_directory / "bigvgan_generator.pt"
-        torch.save({"generator": self.state_dict()}, model_path)
-
-        config_path = save_directory / "config.json"
-        with open(config_path, "w") as config_file:
-            json.dump(self.h, config_file, indent=4)
 
     @classmethod
     def _from_pretrained(
@@ -393,8 +246,7 @@ class BigVGAN(
             resume_download: bool,
             local_files_only: bool,
             token: Union[str, bool, None],
-            map_location: str = "cpu",  # Additional argument
-            strict: bool = False,  # Additional argument
+            map_location: str = "cpu",
             **model_kwargs,
     ):
         """Load Pytorch pretrained weights and return the loaded model."""
@@ -442,9 +294,6 @@ class BigVGAN(
         try:
             model.load_state_dict(checkpoint_dict["generator"])
         except RuntimeError:
-            print(
-                f"[INFO] the pretrained checkpoint does not contain weight norm. Loading the checkpoint after removing weight norm!"
-            )
             model.remove_weight_norm()
             model.load_state_dict(checkpoint_dict["generator"])
 

@@ -63,7 +63,7 @@ def load_models_api(args, device=torch.device("cuda")):
 
     model_path = load_custom_model_from_hf("lj1995/VoiceConversionWebUI", "rmvpe.pt")
 
-    f0_extractor = RMVPE(model_path, is_half=False, device=device)
+    f0_extractor = RMVPE(model_path, device=device)
     f0_fn = f0_extractor.infer_from_audio
 
     model = build_model(model_params)
@@ -75,7 +75,7 @@ def load_models_api(args, device=torch.device("cuda")):
     for key in model:
         model[key].eval()
         model[key].to(device)
-    model.cfm.estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+    model.cfm.estimator.setup_caches()
 
     # Load additional modules
     from modules.campplus.DTDNN import CAMPPlus
@@ -164,13 +164,6 @@ def load_models_api(args, device=torch.device("cuda")):
 
 @torch.no_grad()
 def run_inference(args, model_bundle, device=torch.device("cuda")):
-
-    dit_config_path = args.config
-    with open(dit_config_path, "r") as config_file:
-        config = yaml.safe_load(config_file)
-
-    # use_style_residual
-    use_style_residual = config['model_params']['length_regulator'].get('use_style_residual',False)
 
     model, semantic_fn, f0_fn, vocoder_fn, campplus_model, mel_fn, mel_fn_args = model_bundle
     fp16 = args.fp16
@@ -284,12 +277,8 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
         chunk_cond = cond[:, processed_frames:processed_frames + max_source_window]
         is_last_chunk = processed_frames + max_source_window >= cond.size(1)
         cat_condition = torch.cat([prompt_condition, chunk_cond], dim=1)
-        # use_style_residual
-        if use_style_residual:
-            chunk_style_cond = style_cond[:, processed_frames:processed_frames + max_source_window]
-            cat_style_cond = torch.cat([style_prompt, chunk_style_cond], dim=1)
-        else:
-            cat_style_cond=None
+        chunk_style_cond = style_cond[:, processed_frames:processed_frames + max_source_window]
+        cat_style_cond = torch.cat([style_prompt, chunk_style_cond], dim=1)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=fp16):
             # Voice Conversion
             vc_target = model.cfm.inference(cat_condition,

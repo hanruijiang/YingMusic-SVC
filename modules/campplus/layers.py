@@ -11,8 +11,6 @@ def get_nonlinear(config_str, channels):
     for name in config_str.split('-'):
         if name == 'relu':
             nonlinear.add_module('relu', nn.ReLU(inplace=True))
-        elif name == 'prelu':
-            nonlinear.add_module('prelu', nn.PReLU(channels))
         elif name == 'batchnorm':
             nonlinear.add_module('batchnorm', nn.BatchNorm1d(channels))
         elif name == 'batchnorm_':
@@ -22,7 +20,7 @@ def get_nonlinear(config_str, channels):
             raise ValueError('Unexpected module ({}).'.format(name))
     return nonlinear
 
-def statistics_pooling(x, dim=-1, keepdim=False, unbiased=True, eps=1e-2):
+def statistics_pooling(x, dim=-1, keepdim=False, unbiased=True):
     mean = x.mean(dim=dim)
     std = x.std(dim=dim, unbiased=unbiased)
     stats = torch.cat([mean, std], dim=-1)
@@ -30,23 +28,8 @@ def statistics_pooling(x, dim=-1, keepdim=False, unbiased=True, eps=1e-2):
         stats = stats.unsqueeze(dim=dim)
     return stats
 
-def masked_statistics_pooling(x, x_lens, dim=-1, keepdim=False, unbiased=True, eps=1e-2):
-    stats = []
-    for i, x_len in enumerate(x_lens):
-        x_i = x[i, :, :x_len]
-        mean = x_i.mean(dim=dim)
-        std = x_i.std(dim=dim, unbiased=unbiased)
-        stats.append(torch.cat([mean, std], dim=-1))
-    stats = torch.stack(stats, dim=0)
-    if keepdim:
-        stats = stats.unsqueeze(dim=dim)
-    return stats
-
-
 class StatsPool(nn.Module):
-    def forward(self, x, x_lens=None):
-        if x_lens is not None:
-            return masked_statistics_pooling(x, x_lens)
+    def forward(self, x):
         return statistics_pooling(x)
 
 
@@ -110,13 +93,8 @@ class CAMLayer(nn.Module):
         m = self.sigmoid(self.linear2(context))
         return y*m
 
-    def seg_pooling(self, x, seg_len=100, stype='avg'):
-        if stype == 'avg':
-            seg = F.avg_pool1d(x, kernel_size=seg_len, stride=seg_len, ceil_mode=True)
-        elif stype == 'max':
-            seg = F.max_pool1d(x, kernel_size=seg_len, stride=seg_len, ceil_mode=True)
-        else:
-            raise ValueError('Wrong segment pooling type.')
+    def seg_pooling(self, x, seg_len=100):
+        seg = F.avg_pool1d(x, kernel_size=seg_len, stride=seg_len, ceil_mode=True)
         shape = seg.shape
         seg = seg.unsqueeze(-1).expand(*shape, seg_len).reshape(*shape[:-1], -1)
         seg = seg[..., :x.shape[-1]]

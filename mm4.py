@@ -61,10 +61,10 @@ def adaptive_pitch_shift_factor(voiced_f0_ori, low_threshold=120, high_threshold
         # Gradual reduction as F0 increases
         factor = max(min_factor, max_factor - (mean_f0 - high_threshold) / (560 - high_threshold))
 
-    # For low F0 (typically male voices), allow more pitch shift
+    # Adjust the factor for low F0
     elif mean_f0 < low_threshold:
         # Gradual increase as F0 decreases
-        factor = max_factor - (low_threshold - mean_f0) / low_threshold * 1.2  # * 0.8
+        factor = max_factor - (low_threshold - mean_f0) / low_threshold * 1.2
 
     else:
         factor = max_factor
@@ -107,7 +107,7 @@ def preprocess_voice_conversion(
     Returns:
         final_f0_alt: Processed F0 sequence
     """
-    if forch_pitch_shift == None:
+    if forch_pitch_shift is None:
         # Calculate base pitch shift
         base_pitch_shift = calculate_semitone_shift(voiced_f0_alt, voiced_f0_ori)
 
@@ -122,7 +122,7 @@ def preprocess_voice_conversion(
         pitch_shift = np.clip(pitch_shift, -max_shift_semitones, max_shift_semitones)
 
         print(f'auto predicted pitch shift: {pitch_shift}')
-        # 离散化,以8semitone为界限做八度变化
+        # Map the estimate to an octave shift.
         pitch_shift = semitone_map(pitch_shift)
 
     else:

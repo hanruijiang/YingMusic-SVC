@@ -61,7 +61,6 @@ class Encoder(nn.Module):
     def __init__(
         self,
         in_channels,
-        in_size,
         n_encoders,
         kernel_size,
         n_blocks,
@@ -72,18 +71,14 @@ class Encoder(nn.Module):
         self.n_encoders = n_encoders
         self.bn = nn.BatchNorm2d(in_channels, momentum=momentum)
         self.layers = nn.ModuleList()
-        self.latent_channels = []
         for i in range(self.n_encoders):
             self.layers.append(
                 ResEncoderBlock(
                     in_channels, out_channels, kernel_size, n_blocks, momentum=momentum
                 )
             )
-            self.latent_channels.append([out_channels, in_size])
             in_channels = out_channels
             out_channels *= 2
-            in_size //= 2
-        self.out_size = in_size
         self.out_channel = out_channels
 
     def forward(self, x: torch.Tensor):
@@ -118,7 +113,7 @@ class ResEncoderBlock(nn.Module):
             return x
 
 
-class Intermediate(nn.Module):  #
+class Intermediate(nn.Module):
     def __init__(self, in_channels, out_channels, n_inters, n_blocks, momentum=0.01):
         super(Intermediate, self).__init__()
         self.n_inters = n_inters
@@ -198,7 +193,7 @@ class DeepUnet(nn.Module):
     ):
         super(DeepUnet, self).__init__()
         self.encoder = Encoder(
-            in_channels, 128, en_de_layers, kernel_size, n_blocks, en_out_channels
+            in_channels, en_de_layers, kernel_size, n_blocks, en_out_channels
         )
         self.intermediate = Intermediate(
             self.encoder.out_channel // 2,
@@ -238,17 +233,14 @@ class E2E(nn.Module):
             en_out_channels,
         )
         self.cnn = nn.Conv2d(en_out_channels, 3, (3, 3), padding=(1, 1))
-        if n_gru:
-            self.fc = nn.Sequential(
-                BiGRU(3 * 128, 256, n_gru),
-                nn.Linear(512, 360),
-                nn.Dropout(0.25),
-                nn.Sigmoid(),
-            )
-        else:
-            self.fc = nn.Sequential(
-                nn.Linear(3 * nn.N_MELS, nn.N_CLASS), nn.Dropout(0.25), nn.Sigmoid()
-            )
+        if n_gru < 1:
+            raise ValueError("RMVPE requires at least one GRU layer")
+        self.fc = nn.Sequential(
+            BiGRU(3 * 128, 256, n_gru),
+            nn.Linear(512, 360),
+            nn.Dropout(0.25),
+            nn.Sigmoid(),
+        )
 
     def forward(self, mel):
         mel = mel.transpose(-1, -2).unsqueeze(1)
@@ -260,7 +252,6 @@ class E2E(nn.Module):
 class MelSpectrogram(torch.nn.Module):
     def __init__(
         self,
-        is_half,
         n_mel_channels,
         sampling_rate,
         win_length,
@@ -286,56 +277,37 @@ class MelSpectrogram(torch.nn.Module):
         self.n_fft = win_length if n_fft is None else n_fft
         self.hop_length = hop_length
         self.win_length = win_length
-        self.sampling_rate = sampling_rate
-        self.n_mel_channels = n_mel_channels
         self.clamp = clamp
-        self.is_half = is_half
 
-    def forward(self, audio, keyshift=0, speed=1, center=True):
-        factor = 2 ** (keyshift / 12)
-        n_fft_new = int(np.round(self.n_fft * factor))
-        win_length_new = int(np.round(self.win_length * factor))
-        hop_length_new = int(np.round(self.hop_length * speed))
-        keyshift_key = str(keyshift) + "_" + str(audio.device)
-        if keyshift_key not in self.hann_window:
-            self.hann_window[keyshift_key] = torch.hann_window(win_length_new).to(
-                audio.device
-            )
+    def forward(self, audio, center=True):
+        device = audio.device
+        if device not in self.hann_window:
+            self.hann_window[device] = torch.hann_window(self.win_length, device=device)
         fft = torch.stft(
             audio,
-            n_fft=n_fft_new,
-            hop_length=hop_length_new,
-            win_length=win_length_new,
-            window=self.hann_window[keyshift_key],
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            window=self.hann_window[device],
             center=center,
             return_complex=True,
         )
         magnitude = torch.sqrt(fft.real.pow(2) + fft.imag.pow(2))
-        if keyshift != 0:
-            size = self.n_fft // 2 + 1
-            resize = magnitude.size(1)
-            if resize < size:
-                magnitude = F.pad(magnitude, (0, 0, 0, size - resize))
-            magnitude = magnitude[:, :size, :] * self.win_length / win_length_new
         mel_output = torch.matmul(self.mel_basis, magnitude)
-        if self.is_half == True:
-            mel_output = mel_output.half()
-        log_mel_spec = torch.log(torch.clamp(mel_output, min=self.clamp))
-        return log_mel_spec
+        return torch.log(torch.clamp(mel_output, min=self.clamp))
 
 
 class RMVPE:
-    def __init__(self, model_path: str, is_half, device):
-        self.is_half = is_half
+    def __init__(self, model_path: str, device):
         self.device = device
         self.mel_extractor = MelSpectrogram(
-            is_half, 128, 16000, 1024, 160, None, 30, 8000
+            128, 16000, 1024, 160, None, 30, 8000
         ).to(device)
         model = E2E(4, 1, (2, 2))
         ckpt = torch.load(model_path, map_location='cpu')
         model.load_state_dict(ckpt)
         model.eval()
-        self.model = (model.half() if is_half else model.float()).to(device)
+        self.model = model.float().to(device)
         cents_mapping = 20 * np.arange(360) + 1997.3794084376191
         self.cents_mapping = np.pad(cents_mapping, (4, 4))  # 368
 
@@ -345,7 +317,7 @@ class RMVPE:
             n_pad = 32 * ((n_frames - 1) // 32 + 1) - n_frames
             if n_pad > 0:
                 mel = F.pad(mel, (0, n_pad), mode="constant")
-            mel = mel.half() if self.is_half else mel.float()
+            mel = mel.float()
             hidden = self.model(mel)
             return hidden[:, :n_frames]
 
@@ -363,8 +335,6 @@ class RMVPE:
         )
         hidden = self.mel2hidden(mel)
         hidden = hidden.squeeze(0).cpu().numpy()
-        if self.is_half:
-            hidden = hidden.astype('float32')
 
         f0 = self.decode(hidden, thred=thred)
         return f0

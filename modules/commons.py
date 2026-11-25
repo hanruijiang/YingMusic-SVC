@@ -26,14 +26,14 @@ def build_model(args):
     from modules.flow_matching import CFM
     from modules.length_regulator import InterpolateRegulator
 
+    lr = args.length_regulator
     length_regulator = InterpolateRegulator(
-        channels=args.length_regulator.channels,
-        sampling_ratios=args.length_regulator.sampling_ratios,
-        in_channels=args.length_regulator.in_channels,
-        f0_condition=args.length_regulator.f0_condition if hasattr(args.length_regulator, "f0_condition") else False,
-        n_f0_bins=args.length_regulator.n_f0_bins if hasattr(args.length_regulator, "n_f0_bins") else 512,
-        use_style_residual = args.length_regulator.use_style_residual if hasattr(args.length_regulator, "use_style_residual") else False,
-        residual_alpha = args.length_regulator.residual_alpha if hasattr(args.length_regulator, "residual_alpha") else 0,
+        channels=lr.channels,
+        sampling_ratios=lr.sampling_ratios,
+        in_channels=lr.in_channels,
+        n_f0_bins=lr.n_f0_bins,
+        residual_alpha=lr.residual_alpha,
+        style_dim=args.style_encoder.dim,
     )
     cfm = CFM(args)
     nets = Munch(

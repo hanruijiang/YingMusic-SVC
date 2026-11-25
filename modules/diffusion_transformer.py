@@ -75,15 +75,8 @@ class Transformer(nn.Module):
         ])
         self.norm = AdaptiveLayerNorm(config.dim, RMSNorm(config.dim, eps=config.norm_eps))
         self.freqs_cis: Optional[Tensor] = None
-        self.max_batch_size = -1
-        self.max_seq_length = -1
 
-    def setup_caches(self, max_batch_size, max_seq_length):
-        if self.max_seq_length >= max_seq_length and self.max_batch_size >= max_batch_size:
-            return
-        max_seq_length = find_multiple(max_seq_length, 8)
-        self.max_seq_length = max_seq_length
-        self.max_batch_size = max_batch_size
+    def setup_caches(self):
         dtype = self.norm.project_layer.weight.dtype
         device = self.norm.project_layer.weight.device
 
@@ -167,7 +160,6 @@ class Attention(nn.Module):
         self.n_head = config.n_head
         self.head_dim = config.head_dim
         self.n_local_heads = config.n_local_heads
-        self.dim = config.dim
 
     def forward(self,
                 x: Tensor,
@@ -312,11 +304,8 @@ class DiT(torch.nn.Module):
             uvit_skip_connection=self.uvit_skip_connection,
         )
         self.transformer = Transformer(model_args)
-        self.in_channels = args.DiT.in_channels
-        self.out_channels = args.DiT.in_channels
-        self.num_heads = args.DiT.num_heads
 
-        self.cond_projection = nn.Linear(args.DiT.content_dim, args.DiT.hidden_dim, bias=True) # continuous content
+        self.cond_projection = nn.Linear(args.DiT.content_dim, args.DiT.hidden_dim, bias=True)
 
 
         self.t_embedder = TimestepEmbedder(args.DiT.hidden_dim)
@@ -336,8 +325,8 @@ class DiT(torch.nn.Module):
                                              args.style_encoder.dim * self.transformer_style_condition,
                                              args.DiT.hidden_dim)
 
-    def setup_caches(self, max_batch_size, max_seq_length):
-        self.transformer.setup_caches(max_batch_size, max_seq_length)
+    def setup_caches(self):
+        self.transformer.setup_caches()
     def forward(self, x, prompt_x, x_lens, t, style, cond, style_r=None):
         _, _, T = x.size()
 

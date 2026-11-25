@@ -1,12 +1,10 @@
-from abc import ABC
-
 import torch
 from tqdm import tqdm
 
 from modules.diffusion_transformer import DiT
 
 
-class BASECFM(torch.nn.Module, ABC):
+class BASECFM(torch.nn.Module):
     def __init__(
         self,
         args,
@@ -23,48 +21,19 @@ class BASECFM(torch.nn.Module, ABC):
 
     @torch.inference_mode()
     def inference(self, mu, x_lens, prompt, style, n_timesteps, temperature=1.0, inference_cfg_rate=0.5, style_r=None):
-        """Forward diffusion
-
-        Args:
-            mu (torch.Tensor): output of encoder
-                shape: (batch_size, n_feats, mel_timesteps)
-            mask (torch.Tensor): output_mask
-                shape: (batch_size, 1, mel_timesteps)
-            n_timesteps (int): number of diffusion steps
-            temperature (float, optional): temperature for scaling noise. Defaults to 1.0.
-            spks (torch.Tensor, optional): speaker ids. Defaults to None.
-                shape: (batch_size, spk_emb_dim)
-            cond: Not used but kept for future purposes
-
-        Returns:
-            sample: generated mel-spectrogram
-                shape: (batch_size, n_feats, mel_timesteps)
-        """
+        """Generate a mel spectrogram by integrating the conditional flow."""
         B, T = mu.size(0), mu.size(1)
         z = torch.randn([B, self.in_channels, T], device=mu.device) * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
         return self.solve_euler(z, x_lens, prompt, mu, style, t_span, inference_cfg_rate, style_r=style_r)
 
     def solve_euler(self, x, x_lens, prompt, mu, style, t_span, inference_cfg_rate=0.5, style_r=None):
-        """
-        Fixed euler solver for ODEs.
-        Args:
-            x (torch.Tensor): random noise
-            t_span (torch.Tensor): n_timesteps interpolated
-                shape: (n_timesteps + 1,)
-            mu (torch.Tensor): output of encoder
-                shape: (batch_size, n_feats, mel_timesteps)
-            mask (torch.Tensor): output_mask
-                shape: (batch_size, 1, mel_timesteps)
-            spks (torch.Tensor, optional): speaker ids. Defaults to None.
-                shape: (batch_size, spk_emb_dim)
-            cond: Not used but kept for future purposes
-        """
+        """Integrate the flow with Euler steps and classifier-free guidance."""
         t = t_span[0]
 
-        # apply prompt
+        # Condition on the reference mel.
         prompt_len = prompt.size(-1)
-        prompt_x = torch.zeros_like(x)    # torch.Size([1, 128, 1640])
+        prompt_x = torch.zeros_like(x)
         prompt_x[..., :prompt_len] = prompt[..., :prompt_len]  # torch.Size([1, 128, 349])
         x[..., :prompt_len] = 0
         if self.zero_prompt_speech_token:
