@@ -3,35 +3,17 @@ import os
 import numpy as np
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
-import shutil
-import warnings
 import argparse
 import torch
 import yaml
-warnings.simplefilter('ignore')
-
-# load packages
-import random
-from modules.commons import *
 import time
-from Remix.auger import echo_then_reverb_save
+from modules.commons import build_model, load_checkpoint, recursive_munch, str2bool
 import torchaudio
 import librosa
-from modules.commons import str2bool
 from mm4 import preprocess_voice_conversion
 from hf_utils import load_custom_model_from_hf
 
 ########## tools ##########
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
-
 def crossfade(chunk1, chunk2, overlap):
     fade_out = np.cos(np.linspace(0, np.pi / 2, overlap)) ** 2
     fade_in = np.cos(np.linspace(np.pi / 2, 0, overlap)) ** 2
@@ -58,18 +40,10 @@ def load_models_api(args, device=torch.device("cuda")):
     model_params = recursive_munch(config["model_params"])
     model_params.dit_type = 'DiT'
     model = build_model(model_params, stage="DiT")
-    hop_length = config["preprocess_params"]["spect_params"]["hop_length"]
     sr = config["preprocess_params"]["sr"]
 
     # Load checkpoints
-    model, _, _, _ = load_checkpoint(
-        model,
-        None,
-        dit_checkpoint_path,
-        load_only_params=True,
-        ignore_modules=[],
-        is_distributed=False,
-    )
+    model = load_checkpoint(model, dit_checkpoint_path)
 
     for key in model:
         model[key].eval()
@@ -95,9 +69,6 @@ def load_models_api(args, device=torch.device("cuda")):
         bigvgan_name = model_params.vocoder.name
 
         bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=False)
-
-        #bigvgan_cache is not defined, and hence causing not defined error
-        #bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_cache, use_cuda_kernel=False) 
 
         # remove weight norm in the model and set to eval mode
         bigvgan_model.remove_weight_norm()
@@ -299,7 +270,7 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
             cat_style_cond = torch.cat([style_prompt, chunk_style_cond], dim=1)
         else:
             cat_style_cond=None
-        with torch.autocast(device_type=device.type, dtype=torch.float16 if fp16 else torch.float32):
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=fp16):
             # Voice Conversion
             vc_target = model.cfm.inference(cat_condition,
                                                        torch.LongTensor([cat_condition.size(1)]).to(mel2.device),
@@ -336,10 +307,7 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     os.makedirs(exp_path, exist_ok=True)
     src_name = os.path.basename(source).split(".")[0]
     tgt_name = os.path.basename(target_name).split(".")[0]
-    if hasattr(args, "uuid"):
-        vc_name = f'{src_name}_{tgt_name}_' + args.uuid + '.wav'
-    else:
-        vc_name = f"{tgt_name}_{src_name}_{pitch_shift}.wav"
+    vc_name = f"{tgt_name}_{src_name}_{pitch_shift}.wav"
     output_path = os.path.join(exp_path, vc_name)
     torchaudio.save(output_path, vc_wave.cpu(), sr)
     return output_path
@@ -347,19 +315,17 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=str)
-    parser.add_argument("--target", type=str)
+    parser.add_argument("--source", type=str, required=True, help="Source vocal audio")
+    parser.add_argument("--target", type=str, required=True, help="Reference singer audio")
     parser.add_argument("--diffusion-steps", type=int, default=30)
-    parser.add_argument("--checkpoint", type=str, help="Path to the checkpoint file")
-    parser.add_argument("--expname", type=str)
-    parser.add_argument("--cuda", type=str)
-    parser.add_argument("--fp16", type=str)
-    parser.add_argument("--accompany", type=str)
-    parser.add_argument("--config", type=str)
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the checkpoint file")
+    parser.add_argument("--expname", type=str, default="inference")
+    parser.add_argument("--cuda", type=str, default="0")
+    parser.add_argument("--fp16", type=str2bool, default=True)
+    parser.add_argument("--config", type=str, default="./configs/YingMusic-SVC.yml")
     args = parser.parse_args()
 
     args.cuda = torch.device(f"cuda:{args.cuda}")
-    args.fp16 = str2bool(args.fp16)
     if args.fp16:
         print('Start fp16 to accelerate inference！')
 
@@ -373,9 +339,4 @@ if __name__ == "__main__":
 
     models = load_models_api(args, device=args.cuda)
     vc = run_inference(args, models, device=args.cuda)
-    if args.accompany:
-        vc_t = vc.split('/')
-        a,b = '/'.join(vc_t[:-1]), vc_t[-1]
-        os.makedirs(a + '/accompany', exist_ok=True)
-        op = a + '/accompany/'+b
-        echo_then_reverb_save(vc,op,args.accompany)
+    print(f"Saved converted vocal: {vc}")

@@ -1,15 +1,5 @@
-import os
-os.environ["HF_HUB_CACHE"] = "./checkpoints/hf_cache"
-
-import argparse
-import time
-from pathlib import Path
-
-import librosa
 import numpy as np
-import soundfile as sf
 import torch
-import yaml
 
 
 def calculate_semitone_shift(source_f0, reference_f0):
@@ -150,8 +140,3 @@ def preprocess_voice_conversion(
 
 
     return final_f0_alt, pitch_shift
-
-
-
-
-

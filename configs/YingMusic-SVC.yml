@@ -10,14 +10,6 @@ preprocess_params:
 
 model_params:
   dit_type: "DiT" # uDiT or DiT
-  reg_loss_type: "l1" # l1 or l2
-
-  timbre_shifter:
-    timbre_shifter_type: "rvc"         # ToneColorConverter | rvc
-    pool_size: 3
-    se_db_path: "./modules/openvoice/checkpoints_v2/converter/se_db.pt"
-    ckpt_path: "./modules/openvoice/checkpoints_v2/converter"
-    use_timbre_shifter: true
 
   vocoder:
     type: "bigvgan"
@@ -29,14 +21,6 @@ model_params:
 
   style_encoder:
     dim: 192
-    campplus_path: "campplus_cn_common.bin"
-
-  DAC:
-    encoder_dim: 64
-    encoder_rates: [2, 5, 5, 6]
-    decoder_dim: 1536
-    decoder_rates: [ 6, 5, 5, 2 ]
-    sr: 24000
 
   length_regulator:
     channels: 768
@@ -44,9 +28,7 @@ model_params:
     in_channels: 768
     content_codebook_size: 2048
     sampling_ratios: [1, 1, 1, 1]
-    vector_quantize: false
     n_codebooks: 1
-    quantizer_dropout: 0.0
     f0_condition: true
     n_f0_bins: 256
     use_style_residual: true
@@ -84,8 +66,3 @@ model_params:
     p_dropout: 0.2
     style_condition: true
 
-loss_params:
-  use_balance_loss: true
-  base_lr: 0.0001
-  lambda_mel: 45
-  lambda_kl: 1.0

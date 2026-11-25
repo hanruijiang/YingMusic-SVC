@@ -4,8 +4,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 from modules.commons import sequence_mask
 import numpy as np
-from dac.nn.quantize import VectorQuantize
-from modules.f0_fix import apply_f0_perturbations_cent_with_meta, verify_f0_change
 
 # f0_bin = 256
 f0_max = 1100.0
@@ -96,7 +94,7 @@ class InterpolateRegulator(nn.Module):
         if not is_discrete:
             self.content_in_proj = nn.Linear(in_channels, channels)
             if vector_quantize:
-                self.vq = VectorQuantize(channels, codebook_size, 8)
+                raise ValueError('Vector quantization is not supported by the SVC inference model')
 
         # ---------------- f0 -> style 残差（方案2）----------------
         self.use_style_residual = use_style_residual
@@ -120,16 +118,7 @@ class InterpolateRegulator(nn.Module):
         return torch.sqrt((x.pow(2).mean(dim=dim, keepdim=keepdim)).clamp_min(eps))
 
     def forward(self, x, ylens=None, n_quantizers=None, f0=None, style=None, return_style_residual: bool = False):
-        # apply token drop
-        if self.training:
-            n_quantizers = torch.ones((x.shape[0],)) * self.n_codebooks
-            dropout = torch.randint(1, self.n_codebooks + 1, (x.shape[0],))
-            n_dropout = int(x.shape[0] * self.quantizer_dropout)
-            n_quantizers[:n_dropout] = dropout[:n_dropout]
-            n_quantizers = n_quantizers.to(x.device)
-            # decide whether to drop for each sample in batch
-        else:
-            n_quantizers = torch.ones((x.shape[0],), device=x.device) * (self.n_codebooks if n_quantizers is None else n_quantizers)
+        n_quantizers = torch.ones((x.shape[0],), device=x.device) * (self.n_codebooks if n_quantizers is None else n_quantizers)
         if self.is_discrete:
             if self.n_codebooks > 1:
                 assert len(x.size()) == 3
@@ -158,10 +147,6 @@ class InterpolateRegulator(nn.Module):
             if f0 is None:
                 x = x + self.f0_mask.unsqueeze(-1)
             else:
-                ##############################################################################
-                if self.training:
-                    f0, _ = apply_f0_perturbations_cent_with_meta(f0)    # perturb f0
-                ###############################################################################
                 #quantized_f0 = torch.bucketize(f0, self.f0_bins.to(f0.device))  # (N, T)
                 quantized_f0 = f0_to_coarse(f0, self.n_f0_bins)
                 quantized_f0 = quantized_f0.clamp(0, self.n_f0_bins - 1).long()
@@ -224,13 +209,6 @@ class InterpolateRegulator(nn.Module):
             self.latest_style_residual = style_residual
 
         out = self.model(x).transpose(1, 2).contiguous()
-        if hasattr(self, 'vq'):
-            out_q, commitment_loss, codebook_loss, codes, out,  = self.vq(out.transpose(1, 2))
-            out_q = out_q.transpose(1, 2)
-            if return_style_residual:
-                return out_q * mask, ylens, codes, commitment_loss, codebook_loss, style_residual
-            else:
-                return out_q * mask, ylens, codes, commitment_loss, codebook_loss
         olens = ylens
         if return_style_residual:
             return out * mask, olens, None, None, None, style_residual
