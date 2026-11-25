@@ -1,19 +1,20 @@
-import os
-
-import numpy as np
-
-os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
 import argparse
-import torch
-import yaml
+import os
 import time
-from modules.commons import build_model, load_checkpoint, recursive_munch, str2bool
-import torchaudio
-import librosa
-from mm4 import preprocess_voice_conversion
-from hf_utils import load_custom_model_from_hf
 
-########## tools ##########
+os.environ.setdefault("HF_HUB_CACHE", "./checkpoints/hf_cache")
+
+import librosa
+import numpy as np
+import torch
+import torchaudio
+import yaml
+
+from hf_utils import load_custom_model_from_hf
+from mm4 import preprocess_voice_conversion
+from modules.commons import build_model, load_checkpoint, recursive_munch, str2bool
+
+
 def crossfade(chunk1, chunk2, overlap):
     fade_out = np.cos(np.linspace(0, np.pi / 2, overlap)) ** 2
     fade_in = np.cos(np.linspace(np.pi / 2, 0, overlap)) ** 2
@@ -23,6 +24,41 @@ def crossfade(chunk1, chunk2, overlap):
         chunk2[:overlap] = chunk2[:overlap] * fade_in + chunk1[-overlap:] * fade_out
     return chunk2
 
+def validate_config(config):
+    pre = config["preprocess_params"]
+    spect = pre["spect_params"]
+    params = config["model_params"]
+    expected = (
+        (pre, {"sr": 44100}),
+        (spect, {"hop_length": 512, "n_mels": 128, "n_fft": 2048, "win_length": 2048, "fmin": 0}),
+        (params["vocoder"], {"type": "bigvgan"}),
+        (params["speech_tokenizer"], {"type": "whisper"}),
+        (params["style_encoder"], {"dim": 192}),
+        (params["length_regulator"], {
+            "channels": 768, "in_channels": 768, "sampling_ratios": [1, 1, 1, 1],
+            "f0_condition": True, "n_f0_bins": 256, "use_style_residual": True,
+        }),
+        (params["DiT"], {
+            "hidden_dim": 768, "num_heads": 12, "depth": 17, "in_channels": 128,
+            "content_dim": 768, "style_condition": True, "uvit_skip_connection": True,
+        }),
+    )
+    for section, values in expected:
+        for name, value in values.items():
+            if section.get(name) != value:
+                raise ValueError(f"Official SVC configuration requires {name}={value}")
+    if spect.get("fmax") not in (None, 22050):
+        raise ValueError("Official SVC configuration requires fmax=null or 22050")
+
+    for key, name in (
+        ("vocoder", "nvidia/bigvgan_v2_44khz_128band_512x"),
+        ("speech_tokenizer", "openai/whisper-small"),
+    ):
+        model_name = params[key]["name"]
+        if model_name != name and not os.path.isdir(model_name):
+            raise ValueError(f"{key} requires {name} or its local model directory")
+
+
 def load_models_api(args, device=torch.device("cuda")):
     dit_checkpoint_path = args.checkpoint
     print(f'load model from {dit_checkpoint_path}')
@@ -30,35 +66,12 @@ def load_models_api(args, device=torch.device("cuda")):
     print(f'load config from {dit_config_path}')
     with open(dit_config_path, "r") as config_file:
         config = yaml.safe_load(config_file)
+    validate_config(config)
     model_params = recursive_munch(config["model_params"])
     spect = config["preprocess_params"]["spect_params"]
-    if (config["preprocess_params"]["sr"], spect["hop_length"], spect["n_mels"],
-            spect["n_fft"], spect["win_length"]) != (44100, 512, 128, 2048, 2048):
-        raise ValueError("The official SVC model requires 44100 Hz, hop 512, 128 mel channels and FFT/window 2048")
-    if not model_params.length_regulator.f0_condition:
-        raise ValueError("The official SVC model requires F0 conditioning")
-    # Reject legacy configurations that request a removed architecture.
-    dit = model_params.DiT
-    lr = model_params.length_regulator
-    if (model_params.get("dit_type", "DiT") != "DiT"
-            or dit.get("final_layer_type", "mlp") != "mlp"
-            or any(dit.get(key, False) for key in
-                   ("is_causal", "long_skip_connection", "time_as_token", "style_as_token", "add_resblock_in_transformer"))
-            or lr.get("is_discrete", False)
-            or lr.get("vector_quantize", False)
-            or lr.get("n_codebooks", 1) != 1):
-        raise ValueError("Unsupported model configuration: only continuous Whisper / non-causal MLP DiT is supported")
+    fmin = spect["fmin"]
+    fmax = spect["fmax"]
 
-    fmax = spect.get("fmax")
-    if fmax == "None":
-        fmax = None
-    fmin = spect.get("fmin", 0)
-    if not isinstance(fmin, (int, float)) or not 0 <= fmin < 22050:
-        raise ValueError("Invalid mel fmin")
-    if fmax is not None and (not isinstance(fmax, (int, float)) or not fmin < fmax <= 22050):
-        raise ValueError("Invalid mel fmax")
-
-    # f0 extractor
     from modules.rmvpe import RMVPE
 
     model_path = load_custom_model_from_hf("lj1995/VoiceConversionWebUI", "rmvpe.pt")
@@ -69,7 +82,6 @@ def load_models_api(args, device=torch.device("cuda")):
     model = build_model(model_params)
     sr = config["preprocess_params"]["sr"]
 
-    # Load checkpoints
     model = load_checkpoint(model, dit_checkpoint_path)
 
     for key in model:
@@ -77,7 +89,6 @@ def load_models_api(args, device=torch.device("cuda")):
         model[key].to(device)
     model.cfm.estimator.setup_caches()
 
-    # Load additional modules
     from modules.campplus.DTDNN import CAMPPlus
 
     campplus_ckpt_path = load_custom_model_from_hf(
@@ -89,53 +100,42 @@ def load_models_api(args, device=torch.device("cuda")):
     campplus_model.eval()
     campplus_model.to(device)
 
-    vocoder_type = model_params.vocoder.type
+    from modules.bigvgan.bigvgan import BigVGAN
 
-    if vocoder_type == 'bigvgan':
-        from modules.bigvgan import bigvgan
-        bigvgan_name = model_params.vocoder.name
+    bigvgan_model = BigVGAN.from_pretrained(model_params.vocoder.name)
+    h = bigvgan_model.h
+    vocoder_audio = (h.sampling_rate, h.num_mels, h.hop_size, h.n_fft, h.win_size, h.fmin, h.fmax or sr / 2)
+    svc_audio = (sr, spect["n_mels"], spect["hop_length"], spect["n_fft"], spect["win_length"], fmin, fmax or sr / 2)
+    if vocoder_audio != svc_audio:
+        raise ValueError("BigVGAN and SVC audio configurations must match")
+    bigvgan_model.remove_weight_norm()
+    vocoder_fn = bigvgan_model.eval().to(device)
 
-        bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_name)
-        if (bigvgan_model.h.sampling_rate, bigvgan_model.h.num_mels,
-                bigvgan_model.h.hop_size) != (sr, spect["n_mels"], spect["hop_length"]):
-            raise ValueError("BigVGAN config does not match the SVC audio configuration")
+    from transformers import AutoFeatureExtractor, WhisperModel
 
-        # remove weight norm in the model and set to eval mode
-        bigvgan_model.remove_weight_norm()
-        bigvgan_model = bigvgan_model.eval().to(device)
-        vocoder_fn = bigvgan_model
-    else:
-        raise ValueError(f"Unknown vocoder type: {vocoder_type}")
+    whisper_name = model_params.speech_tokenizer.name
+    whisper_model = WhisperModel.from_pretrained(whisper_name, torch_dtype=torch.float16).to(device)
+    del whisper_model.decoder
+    whisper_feature_extractor = AutoFeatureExtractor.from_pretrained(whisper_name)
 
-    speech_tokenizer_type = model_params.speech_tokenizer.type
-    if speech_tokenizer_type == 'whisper':
-        # whisper
-        from transformers import AutoFeatureExtractor, WhisperModel
-        whisper_name = model_params.speech_tokenizer.name
+    def semantic_fn(waves_16k):
+        ori_inputs = whisper_feature_extractor([waves_16k.squeeze(0).cpu().numpy()],
+                                               return_tensors="pt",
+                                               return_attention_mask=True)
+        ori_input_features = whisper_model._mask_input_features(
+            ori_inputs.input_features, attention_mask=ori_inputs.attention_mask).to(device)
+        with torch.no_grad():
+            ori_outputs = whisper_model.encoder(
+                ori_input_features.to(whisper_model.encoder.dtype),
+                head_mask=None,
+                output_attentions=False,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+        S_ori = ori_outputs.last_hidden_state.to(torch.float32)
+        S_ori = S_ori[:, :waves_16k.size(-1) // 320 + 1]
+        return S_ori
 
-        whisper_model = WhisperModel.from_pretrained(whisper_name, torch_dtype=torch.float16).to(device)
-        del whisper_model.decoder
-        whisper_feature_extractor = AutoFeatureExtractor.from_pretrained(whisper_name)
-
-        def semantic_fn(waves_16k):
-            ori_inputs = whisper_feature_extractor([waves_16k.squeeze(0).cpu().numpy()],
-                                                   return_tensors="pt",
-                                                   return_attention_mask=True)
-            ori_input_features = whisper_model._mask_input_features(
-                ori_inputs.input_features, attention_mask=ori_inputs.attention_mask).to(device)
-            with torch.no_grad():
-                ori_outputs = whisper_model.encoder(
-                    ori_input_features.to(whisper_model.encoder.dtype),
-                    head_mask=None,
-                    output_attentions=False,
-                    output_hidden_states=False,
-                    return_dict=True,
-                )
-            S_ori = ori_outputs.last_hidden_state.to(torch.float32)
-            S_ori = S_ori[:, :waves_16k.size(-1) // 320 + 1]
-            return S_ori
-    else:
-        raise ValueError(f"Unknown speech tokenizer type: {speech_tokenizer_type}")
     # Generate mel spectrograms
     mel_fn_args = {
         "n_fft": config['preprocess_params']['spect_params']['n_fft'],
@@ -168,7 +168,7 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     model, semantic_fn, f0_fn, vocoder_fn, campplus_model, mel_fn, mel_fn_args = model_bundle
     fp16 = args.fp16
     sr = mel_fn_args['sampling_rate']
-    forch_pitch_shift = args.semi_tone_shift
+    force_pitch_shift = args.semi_tone_shift
 
     source = args.source
 
@@ -190,15 +190,13 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     overlap_frame_len = 16
     overlap_wave_len = overlap_frame_len * hop_length
 
-
-    # Process audio
     source_audio = torch.tensor(source_audio).unsqueeze(0).float().to(device)
     ref_audio = torch.tensor(ref_audio[:sr * 25]).unsqueeze(0).float().to(device)
 
     time_vc_start = time.time()
-    # Resample
+
     converted_waves_16k = torchaudio.functional.resample(source_audio, sr, 16000)
-    # if source audio less than 30 seconds, whisper can handle in one forward
+
     if converted_waves_16k.size(-1) <= 16000 * 30:
         S_alt = semantic_fn(converted_waves_16k)
     else:
@@ -248,19 +246,16 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     voiced_F0_ori = F0_ori[F0_ori > 1]
     voiced_F0_alt = F0_alt[F0_alt > 1]
 
-    # automatic f0 adjust
     shifted_f0_alt, pitch_shift = preprocess_voice_conversion(
         voiced_f0_ori=voiced_F0_ori,
         voiced_f0_alt=voiced_F0_alt,
         shifted_f0_alt=F0_alt,
         enable_adaptive=True,
         max_shift_semitones=24,
-        forch_pitch_shift = forch_pitch_shift,
+        force_pitch_shift=force_pitch_shift,
     )
     print(f'automatic pitch shift {pitch_shift} semi tones')
 
-
-    # Length regulation
     cond, style_cond = model.length_regulator(
         S_alt, ylens=target_lengths, f0=shifted_f0_alt, style=style2
     )
@@ -269,10 +264,10 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
     )
 
     max_source_window = max_context_window - mel2.size(2)
-    # split source condition (cond) into chunks
+
     processed_frames = 0
     generated_wave_chunks = []
-    # generate chunk by chunk and stream the output
+
     while processed_frames < cond.size(1):
         chunk_cond = cond[:, processed_frames:processed_frames + max_source_window]
         is_last_chunk = processed_frames + max_source_window >= cond.size(1)
@@ -280,7 +275,7 @@ def run_inference(args, model_bundle, device=torch.device("cuda")):
         chunk_style_cond = style_cond[:, processed_frames:processed_frames + max_source_window]
         cat_style_cond = torch.cat([style_prompt, chunk_style_cond], dim=1)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=fp16):
-            # Voice Conversion
+
             vc_target = model.cfm.inference(cat_condition,
                                                        torch.LongTensor([cat_condition.size(1)]).to(mel2.device),
                                                         mel2, style2, diffusion_steps,
@@ -345,11 +340,11 @@ if __name__ == "__main__":
         parser.error(f"Invalid CUDA device index: {args.cuda}")
     args.cuda = torch.device(f"cuda:{args.cuda}")
     if args.fp16:
-        print('Start fp16 to accelerate inference！')
+        print('DiT FP16 inference enabled')
 
     args.length_adjust = 1.0
     args.inference_cfg_rate = 0.7
-    args.semi_tone_shift = None    # If None, the tone is automatically sandhi
+    args.semi_tone_shift = None
 
     args.output = './outputs'
     os.makedirs(args.output, exist_ok=True)

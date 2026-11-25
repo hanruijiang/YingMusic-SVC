@@ -10,14 +10,10 @@ class BASECFM(torch.nn.Module):
         args,
     ):
         super().__init__()
-        self.estimator = None
 
         self.in_channels = args.DiT.in_channels
 
-        if hasattr(args.DiT, 'zero_prompt_speech_token'):
-            self.zero_prompt_speech_token = args.DiT.zero_prompt_speech_token
-        else:
-            self.zero_prompt_speech_token = False
+        self.zero_prompt_speech_token = args.DiT.zero_prompt_speech_token
 
     @torch.inference_mode()
     def inference(self, mu, x_lens, prompt, style, n_timesteps, temperature=1.0, inference_cfg_rate=0.5, style_r=None):
@@ -31,7 +27,7 @@ class BASECFM(torch.nn.Module):
         """Integrate the flow with Euler steps and classifier-free guidance."""
         t = t_span[0]
 
-        # Condition on the reference mel.
+        # Reference mel conditioning.
         prompt_len = prompt.size(-1)
         prompt_x = torch.zeros_like(x)
         prompt_x[..., :prompt_len] = prompt[..., :prompt_len]  # torch.Size([1, 128, 349])
@@ -43,11 +39,11 @@ class BASECFM(torch.nn.Module):
             dt = t_span[step] - t_span[step - 1]
             if inference_cfg_rate > 0:
                 # Stack original and CFG (null) inputs for batched processing
-                stacked_prompt_x = torch.cat([prompt_x, torch.zeros_like(prompt_x)], dim=0)       # prompt mel
-                stacked_style = torch.cat([style, torch.zeros_like(style)], dim=0)                # timbre token
-                stacked_mu = torch.cat([mu, torch.zeros_like(mu)], dim=0)                         # content
-                stacked_x = torch.cat([x, x], dim=0)                                              # noise
-                stacked_t = torch.cat([t.unsqueeze(0), t.unsqueeze(0)], dim=0)                    # time step
+                stacked_prompt_x = torch.cat([prompt_x, torch.zeros_like(prompt_x)], dim=0)
+                stacked_style = torch.cat([style, torch.zeros_like(style)], dim=0)
+                stacked_mu = torch.cat([mu, torch.zeros_like(mu)], dim=0)
+                stacked_x = torch.cat([x, x], dim=0)
+                stacked_t = torch.cat([t.unsqueeze(0), t.unsqueeze(0)], dim=0)
                 if style_r is not None:
                     stacked_style_r = torch.cat([style_r, torch.zeros_like(style_r)], dim=0)
                 else:

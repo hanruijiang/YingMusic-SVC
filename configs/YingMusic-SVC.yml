@@ -37,5 +37,5 @@ model_params:
     in_channels: 128
     style_condition: true
     content_dim: 768
-    zero_prompt_speech_token: false # for prompt component, do not input corresponding speech token
+    zero_prompt_speech_token: false
     uvit_skip_connection: true

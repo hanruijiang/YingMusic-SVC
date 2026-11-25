@@ -36,19 +36,7 @@ def get_f0_statistics(f0_sequence):
 
 
 def adaptive_pitch_shift_factor(voiced_f0_ori, low_threshold=120, high_threshold=205, min_factor=0.3, max_factor=1.0):
-    """
-    Calculate adaptive pitch shift factor based on original F0 characteristics.
-
-    Args:
-        voiced_f0_ori: Original F0 sequence
-        low_threshold: F0 threshold below which to increase shift (Hz)
-        high_threshold: F0 threshold above which to reduce shift (Hz)
-        min_factor: Minimum reduction factor for high F0
-        max_factor: Maximum factor (no reduction)
-
-    Returns:
-        Adaptive factor
-    """
+    """Scale the pitch shift according to the mean reference F0."""
     f0_stats = get_f0_statistics(voiced_f0_ori)
 
     if f0_stats["mean"] == 0:
@@ -56,14 +44,12 @@ def adaptive_pitch_shift_factor(voiced_f0_ori, low_threshold=120, high_threshold
 
     mean_f0 = f0_stats["mean"]
 
-    # For high F0 (typically female voices), reduce pitch shift
     if mean_f0 > high_threshold:
-        # Gradual reduction as F0 increases
+
         factor = max(min_factor, max_factor - (mean_f0 - high_threshold) / (560 - high_threshold))
 
-    # Adjust the factor for low F0
     elif mean_f0 < low_threshold:
-        # Gradual increase as F0 decreases
+
         factor = max_factor - (low_threshold - mean_f0) / low_threshold * 1.2
 
     else:
@@ -92,33 +78,19 @@ def semitone_map(x: float, threshold=7) -> int:
 
 
 def preprocess_voice_conversion(
-    voiced_f0_ori, voiced_f0_alt, shifted_f0_alt, enable_adaptive=True, max_shift_semitones=8, forch_pitch_shift=None
+    voiced_f0_ori, voiced_f0_alt, shifted_f0_alt, enable_adaptive=True, max_shift_semitones=8, force_pitch_shift=None
 ):
-    """
-    Main preprocessing function for voice conversion.
+    """Adjust source F0 to the reference register and return the octave shift."""
+    if force_pitch_shift is None:
 
-    Args:
-        voiced_f0_ori: Original F0 sequence
-        voiced_f0_alt: Alternative F0 sequence for reference
-        shifted_f0_alt: Pre-shifted F0 sequence
-        enable_adaptive: Whether to use adaptive pitch shifting
-        max_shift_semitones: Maximum allowed pitch shift in semitones
-
-    Returns:
-        final_f0_alt: Processed F0 sequence
-    """
-    if forch_pitch_shift is None:
-        # Calculate base pitch shift
         base_pitch_shift = calculate_semitone_shift(voiced_f0_alt, voiced_f0_ori)
 
-        # Apply adaptive factor if enabled
         if enable_adaptive:
             adaptive_factor = adaptive_pitch_shift_factor(voiced_f0_ori)
             pitch_shift = base_pitch_shift * adaptive_factor + 3.5
         else:
             pitch_shift = base_pitch_shift
 
-        # Clamp pitch shift to reasonable range
         pitch_shift = np.clip(pitch_shift, -max_shift_semitones, max_shift_semitones)
 
         print(f'auto predicted pitch shift: {pitch_shift}')
@@ -126,9 +98,8 @@ def preprocess_voice_conversion(
         pitch_shift = semitone_map(pitch_shift)
 
     else:
-        pitch_shift = forch_pitch_shift
+        pitch_shift = force_pitch_shift
 
-    # Apply pitch adjustment
     final_f0_alt = adjust_f0_semitones(shifted_f0_alt, pitch_shift)
 
 

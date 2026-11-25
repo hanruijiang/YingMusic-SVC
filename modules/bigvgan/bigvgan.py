@@ -141,7 +141,6 @@ class BigVGAN(
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
 
-        # Pre-conv
         self.conv_pre = weight_norm(
             Conv1d(h.num_mels, h.upsample_initial_channel, 7, 1, padding=3)
         )
@@ -186,7 +185,6 @@ class BigVGAN(
             Conv1d(ch, 1, 7, 1, padding=3, bias=h.use_bias_at_final)
         )
 
-        # Weight initialization
         for i in range(len(self.ups)):
             self.ups[i].apply(init_weights)
         self.conv_post.apply(init_weights)
@@ -194,14 +192,14 @@ class BigVGAN(
         self.use_tanh_at_final = h.use_tanh_at_final
 
     def forward(self, x):
-        # Pre-conv
+
         x = self.conv_pre(x)
 
         for i in range(self.num_upsamples):
-            # Upsampling
+
             for i_up in range(len(self.ups[i])):
                 x = self.ups[i][i_up](x)
-            # AMP blocks
+
             xs = None
             for j in range(self.num_kernels):
                 if xs is None:
@@ -210,10 +208,9 @@ class BigVGAN(
                     xs += self.resblocks[i * self.num_kernels + j](x)
             x = xs / self.num_kernels
 
-        # Post-conv
         x = self.activation_post(x)
         x = self.conv_post(x)
-        # Final tanh activation
+
         if self.use_tanh_at_final:
             x = torch.tanh(x)
         else:
@@ -222,17 +219,15 @@ class BigVGAN(
         return x
 
     def remove_weight_norm(self):
-        try:
-            print("Removing weight norm...")
-            for l in self.ups:
-                for l_i in l:
-                    remove_weight_norm(l_i)
-            for l in self.resblocks:
-                l.remove_weight_norm()
-            remove_weight_norm(self.conv_pre)
-            remove_weight_norm(self.conv_post)
-        except ValueError:
-            pass
+        if not hasattr(self.conv_pre, "weight_g"):
+            return
+        for layers in self.ups:
+            for layer in layers:
+                remove_weight_norm(layer)
+        for block in self.resblocks:
+            block.remove_weight_norm()
+        remove_weight_norm(self.conv_pre)
+        remove_weight_norm(self.conv_post)
 
     @classmethod
     def _from_pretrained(
@@ -289,12 +284,9 @@ class BigVGAN(
                 local_files_only=local_files_only,
             )
 
-        checkpoint_dict = torch.load(model_file, map_location=map_location)
-
-        try:
-            model.load_state_dict(checkpoint_dict["generator"])
-        except RuntimeError:
+        state_dict = torch.load(model_file, map_location=map_location)["generator"]
+        if "conv_pre.weight_g" not in state_dict:
             model.remove_weight_norm()
-            model.load_state_dict(checkpoint_dict["generator"])
+        model.load_state_dict(state_dict, strict=True)
 
         return model

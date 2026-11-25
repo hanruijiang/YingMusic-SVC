@@ -43,23 +43,16 @@ def build_model(args):
     return nets
 
 def load_checkpoint(model, path):
-    state = torch.load(path, map_location="cpu")
-    if not isinstance(state, dict) or not isinstance(state.get("net"), dict):
-        raise RuntimeError("Checkpoint must contain a 'net' mapping")
-    params = state["net"]
+    params = torch.load(path, map_location="cpu")["net"]
     for name, module in model.items():
-        if name not in params or not isinstance(params[name], dict):
-            raise RuntimeError(f"Missing checkpoint module: {name}")
-        state_dict = {}
-        for key, value in params[name].items():
-            key = key.removeprefix("module.")
-            if key in state_dict:
-                raise RuntimeError(f"Duplicate checkpoint key: {name}.{key}")
-            state_dict[key] = value
+        state_dict = {
+            key.removeprefix("module."): value
+            for key, value in params[name].items()
+        }
         module.load_state_dict(state_dict, strict=True)
-        module.eval()
         print(f"{name} loaded")
     return model
+
 
 def recursive_munch(d):
     if isinstance(d, dict):

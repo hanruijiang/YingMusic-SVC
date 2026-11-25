@@ -294,7 +294,7 @@ class DiT(torch.nn.Module):
         args
     ):
         super(DiT, self).__init__()
-        self.uvit_skip_connection = args.DiT.uvit_skip_connection if hasattr(args.DiT, 'uvit_skip_connection') else False
+        self.uvit_skip_connection = args.DiT.uvit_skip_connection
         model_args = ModelArgs(
             block_size=16384,
             n_layer=args.DiT.depth,
@@ -330,7 +330,7 @@ class DiT(torch.nn.Module):
     def forward(self, x, prompt_x, x_lens, t, style, cond, style_r=None):
         _, _, T = x.size()
 
-        t1 = self.t_embedder(t)  # (N, D)
+        t1 = self.t_embedder(t)
 
         cond = self.cond_projection(cond)
 
