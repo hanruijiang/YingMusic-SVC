@@ -3,7 +3,6 @@
 
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint as cp
 from torch import nn
 
 
@@ -133,13 +132,11 @@ class CAMDenseTDNNLayer(nn.Module):
                  stride=1,
                  dilation=1,
                  bias=False,
-                 config_str='batchnorm-relu',
-                 memory_efficient=False):
+                 config_str='batchnorm-relu'):
         super(CAMDenseTDNNLayer, self).__init__()
         assert kernel_size % 2 == 1, 'Expect equal paddings, but got even kernel size ({})'.format(
             kernel_size)
         padding = (kernel_size - 1) // 2 * dilation
-        self.memory_efficient = memory_efficient
         self.nonlinear1 = get_nonlinear(config_str, in_channels)
         self.linear1 = nn.Conv1d(in_channels, bn_channels, 1, bias=False)
         self.nonlinear2 = get_nonlinear(config_str, bn_channels)
@@ -155,10 +152,7 @@ class CAMDenseTDNNLayer(nn.Module):
         return self.linear1(self.nonlinear1(x))
 
     def forward(self, x):
-        if self.training and self.memory_efficient:
-            x = cp.checkpoint(self.bn_function, x)
-        else:
-            x = self.bn_function(x)
+        x = self.bn_function(x)
         x = self.cam_layer(self.nonlinear2(x))
         return x
 
@@ -173,8 +167,7 @@ class CAMDenseTDNNBlock(nn.ModuleList):
                  stride=1,
                  dilation=1,
                  bias=False,
-                 config_str='batchnorm-relu',
-                 memory_efficient=False):
+                 config_str='batchnorm-relu'):
         super(CAMDenseTDNNBlock, self).__init__()
         for i in range(num_layers):
             layer = CAMDenseTDNNLayer(in_channels=in_channels + i * out_channels,
@@ -184,8 +177,7 @@ class CAMDenseTDNNBlock(nn.ModuleList):
                                    stride=stride,
                                    dilation=dilation,
                                    bias=bias,
-                                   config_str=config_str,
-                                   memory_efficient=memory_efficient)
+                                   config_str=config_str)
             self.add_module('tdnnd%d' % (i + 1), layer)
 
     def forward(self, x):

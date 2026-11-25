@@ -22,7 +22,7 @@ class BASECFM(torch.nn.Module, ABC):
             self.zero_prompt_speech_token = False
 
     @torch.inference_mode()
-    def inference(self, mu, x_lens, prompt, style, f0, n_timesteps, temperature=1.0, inference_cfg_rate=0.5, style_r=None):
+    def inference(self, mu, x_lens, prompt, style, n_timesteps, temperature=1.0, inference_cfg_rate=0.5, style_r=None):
         """Forward diffusion
 
         Args:
@@ -43,7 +43,6 @@ class BASECFM(torch.nn.Module, ABC):
         B, T = mu.size(0), mu.size(1)
         z = torch.randn([B, self.in_channels, T], device=mu.device) * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
-        # t_span = t_span + (-1) * (torch.cos(torch.pi / 2 * t_span) - 1 + t_span)
         return self.solve_euler(z, x_lens, prompt, mu, style, t_span, inference_cfg_rate, style_r=style_r)
 
     def solve_euler(self, x, x_lens, prompt, mu, style, t_span, inference_cfg_rate=0.5, style_r=None):
@@ -61,7 +60,7 @@ class BASECFM(torch.nn.Module, ABC):
                 shape: (batch_size, spk_emb_dim)
             cond: Not used but kept for future purposes
         """
-        t, _, _ = t_span[0], t_span[-1], t_span[1] - t_span[0]
+        t = t_span[0]
 
         # apply prompt
         prompt_len = prompt.size(-1)
@@ -83,7 +82,7 @@ class BASECFM(torch.nn.Module, ABC):
                 if style_r is not None:
                     stacked_style_r = torch.cat([style_r, torch.zeros_like(style_r)], dim=0)
                 else:
-                    stacked_style_r=None
+                    stacked_style_r = None
 
                 # Perform a single forward pass for both original and CFG inputs
                 stacked_dphi_dt = self.estimator(
@@ -101,8 +100,6 @@ class BASECFM(torch.nn.Module, ABC):
 
             x = x + dt * dphi_dt
             t = t + dt
-            if step < len(t_span) - 1:
-                dt = t_span[step + 1] - t
             x[:, :, :prompt_len] = 0
 
         return x
@@ -113,7 +110,4 @@ class CFM(BASECFM):
         super().__init__(
             args
         )
-        if args.dit_type == "DiT":
-            self.estimator = DiT(args)
-        else:
-            raise NotImplementedError(f"Unknown diffusion type {args.dit_type}")
+        self.estimator = DiT(args)

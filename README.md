@@ -30,11 +30,11 @@ mkdir -p checkpoints
 huggingface-cli download GiantAILab/YingMusic-SVC YingMusic-SVC-full.pt --local-dir checkpoints
 ```
 
-RMVPE, CAMPPlus, Whisper and BigVGAN weights are downloaded automatically from Hugging Face on first use. Use trusted checkpoints only.
+RMVPE, CAMPPlus, Whisper and BigVGAN weights are downloaded automatically from Hugging Face on first use. Use trusted checkpoints only. All required SVC state-dict entries must load successfully.
 
 ## Inference
 
-Run from the repository root. Provide an isolated source vocal and a reference vocal; the reference is truncated to 25 seconds internally.
+Run from the repository root. Provide an isolated source vocal and a reference vocal; the reference is truncated to 25 seconds internally. Inputs must be finite and at least 0.1 seconds long. The configuration supports the official 44.1 kHz, 128-mel, 512-hop SVC model only; other model architectures, CPU inference and accompaniment separation are not supported.
 
 ```bash
 python my_inference.py \
@@ -48,7 +48,7 @@ python my_inference.py \
     --expname example
 ```
 
-The converted 44.1 kHz vocal WAV is saved under `outputs/example/`. Use `--fp16 False` to disable autocast, or `--help` to list arguments. Alternatively, edit the paths in `my_infer.sh` and run `bash my_infer.sh`.
+The converted 44.1 kHz vocal WAV is saved under `outputs/example/`. `--fp16 False` disables DiT autocast; Whisper still uses FP16. Use `--help` to list arguments, or edit the paths in `my_infer.sh` and run `bash my_infer.sh`.
 
 ## Acknowledgements and license
 

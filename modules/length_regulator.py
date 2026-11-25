@@ -5,7 +5,6 @@ from torch.nn import functional as F
 from modules.commons import sequence_mask
 import numpy as np
 
-# f0_bin = 256
 f0_max = 1100.0
 f0_min = 50.0
 f0_mel_min = 1127 * np.log(1 + f0_min / 700)
@@ -16,7 +15,6 @@ def f0_to_coarse(f0, f0_bin):
   a = (f0_bin - 2) / (f0_mel_max - f0_mel_min)
   b = f0_mel_min * a - 1.
   f0_mel = torch.where(f0_mel > 0, f0_mel * a - b, f0_mel)
-  # torch.clip_(f0_mel, min=1., max=float(f0_bin - 1))
   f0_coarse = torch.round(f0_mel).long()
   f0_coarse = f0_coarse * (f0_coarse > 0)
   f0_coarse = f0_coarse + ((f0_coarse < 1) * 1)
@@ -29,21 +27,15 @@ class InterpolateRegulator(nn.Module):
             self,
             channels: int,
             sampling_ratios: Tuple,
-            is_discrete: bool = False,
-            in_channels: int = None,  # only applies to continuous input
-            vector_quantize: bool = False,  # whether to use vector quantization, only applies to continuous input
-            codebook_size: int = 1024, # for discrete only
+            in_channels: int,
             out_channels: int = None,
             groups: int = 1,
-            n_codebooks: int = 1,  # number of codebooks
-            quantizer_dropout: float = 0.0,  # dropout for quantizer
             f0_condition: bool = False,
             n_f0_bins: int = 512,
             # f0 -> style 残差（方案2）相关开关与参数（仅在本模块内部实现，不改上游）
             use_style_residual: bool = False,
             style_dim: int = 192,
             residual_alpha: float = 0.2,
-            detach_style_scale: bool = True,
     ):
         super().__init__()
         self.sampling_ratios = sampling_ratios
@@ -62,21 +54,6 @@ class InterpolateRegulator(nn.Module):
             nn.Conv1d(channels, out_channels, 1, 1)
         )
         self.model = nn.Sequential(*model)
-        self.is_discrete = is_discrete
-        if self.is_discrete:
-            self.embedding = nn.Embedding(codebook_size, channels)
-
-        # self.mask_token = nn.Parameter(torch.zeros(1, channels))
-
-        self.n_codebooks = n_codebooks
-        if n_codebooks > 1:
-            self.extra_codebooks = nn.ModuleList([
-                nn.Embedding(codebook_size, channels) for _ in range(n_codebooks - 1)
-            ])
-            self.extra_codebook_mask_tokens = nn.ParameterList([
-                nn.Parameter(torch.zeros(1, channels)) for _ in range(n_codebooks - 1)
-            ])
-        self.quantizer_dropout = quantizer_dropout
 
         # 统一记录 f0 bins（供残差分支使用）
         self.n_f0_bins = n_f0_bins
@@ -84,22 +61,15 @@ class InterpolateRegulator(nn.Module):
         if f0_condition:
             self.f0_embedding = nn.Embedding(n_f0_bins, channels)
             self.f0_condition = f0_condition
-            self.n_f0_bins = n_f0_bins
-            self.f0_bins = torch.arange(2, 1024, 1024 // n_f0_bins)
-            # self.f0_mask = nn.Parameter(torch.zeros(1, channels))
             self.register_buffer("f0_mask", torch.zeros(1, channels))
         else:
             self.f0_condition = False
 
-        if not is_discrete:
-            self.content_in_proj = nn.Linear(in_channels, channels)
-            if vector_quantize:
-                raise ValueError('Vector quantization is not supported by the SVC inference model')
+        self.content_in_proj = nn.Linear(in_channels, channels)
 
         # ---------------- f0 -> style 残差（方案2）----------------
         self.use_style_residual = use_style_residual
         self.style_dim = style_dim
-        self.detach_style_scale = detach_style_scale
         # 作为标量上限因子（不训练），便于稳态控制
         self.register_buffer("residual_alpha", torch.tensor(residual_alpha, dtype=torch.float32))
         if self.use_style_residual:
@@ -110,31 +80,13 @@ class InterpolateRegulator(nn.Module):
                 nn.Mish(),
                 nn.Linear(style_dim, style_dim),
             )
-        # 对外缓存最新一次 forward 计算出的 style 残差序列（B, T, style_dim）
-        self.latest_style_residual = None
 
     @staticmethod
     def _rms(x: torch.Tensor, dim: int = -1, keepdim: bool = True, eps: float = 1e-6) -> torch.Tensor:
         return torch.sqrt((x.pow(2).mean(dim=dim, keepdim=keepdim)).clamp_min(eps))
 
-    def forward(self, x, ylens=None, n_quantizers=None, f0=None, style=None, return_style_residual: bool = False):
-        n_quantizers = torch.ones((x.shape[0],), device=x.device) * (self.n_codebooks if n_quantizers is None else n_quantizers)
-        if self.is_discrete:
-            if self.n_codebooks > 1:
-                assert len(x.size()) == 3
-                x_emb = self.embedding(x[:, 0])
-                for i, emb in enumerate(self.extra_codebooks):
-                    x_emb = x_emb + (n_quantizers > i+1)[..., None, None] * emb(x[:, i+1])
-                    # add mask token if not using this codebook
-                    # x_emb = x_emb + (n_quantizers <= i+1)[..., None, None] * self.extra_codebook_mask_tokens[i]
-                x = x_emb
-            elif self.n_codebooks == 1:
-                if len(x.size()) == 2:
-                    x = self.embedding(x)
-                else:
-                    x = self.embedding(x[:, 0])
-        else:
-            x = self.content_in_proj(x)
+    def forward(self, x, ylens, f0=None, style=None):
+        x = self.content_in_proj(x)
         # x in (B, T, D)
         mask = sequence_mask(ylens).unsqueeze(-1)
         if self.interpolate:
@@ -147,7 +99,6 @@ class InterpolateRegulator(nn.Module):
             if f0 is None:
                 x = x + self.f0_mask.unsqueeze(-1)
             else:
-                #quantized_f0 = torch.bucketize(f0, self.f0_bins.to(f0.device))  # (N, T)
                 quantized_f0 = f0_to_coarse(f0, self.n_f0_bins)
                 quantized_f0 = quantized_f0.clamp(0, self.n_f0_bins - 1).long()
                 f0_emb = self.f0_embedding(quantized_f0)
@@ -157,7 +108,6 @@ class InterpolateRegulator(nn.Module):
 
         # ============== f0 -> style 残差（方案2）：仅依赖 f0 ==============
         style_residual = None
-        self.latest_style_residual = None
         if self.use_style_residual and style is not None and ylens is not None:
             B = style.size(0)
             # x 当前为 (B, C, T_out) 形式
@@ -192,8 +142,6 @@ class InterpolateRegulator(nn.Module):
 
             # 以全局 style 的 RMS 为标尺，缩放到 alpha * RMS(style)
             s_ref = self._rms(style, dim=-1, keepdim=True)  # (B, 1)
-            if self.detach_style_scale:
-                s_ref = s_ref.detach()
             # 计算残差在时域+特征域的 RMS（仅有效帧）
             res_rms_t = self._rms(res * mask_bt, dim=-1)  # (B, T_out, 1)
             valid_counts = mask_bt.sum(1, keepdim=True).clamp_min(1e-6)  # (B, 1, 1)
@@ -206,11 +154,6 @@ class InterpolateRegulator(nn.Module):
             # 静音与越界掩码
             res = res * voiced * mask_bt
             style_residual = res  # (B, T_out, Ds)
-            self.latest_style_residual = style_residual
 
         out = self.model(x).transpose(1, 2).contiguous()
-        olens = ylens
-        if return_style_residual:
-            return out * mask, olens, None, None, None, style_residual
-        else:
-            return out * mask, olens, None, None, None
+        return out * mask, style_residual

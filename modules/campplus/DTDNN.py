@@ -54,8 +54,7 @@ class CAMPPlus(nn.Module):
                  growth_rate=32,
                  bn_size=4,
                  init_channels=128,
-                 config_str='batchnorm-relu',
-                 memory_efficient=True):
+                 config_str='batchnorm-relu'):
         super(CAMPPlus, self).__init__()
 
         self.head = FCM(feat_dim=feat_dim)
@@ -82,8 +81,7 @@ class CAMPPlus(nn.Module):
                                    bn_channels=bn_size * growth_rate,
                                    kernel_size=kernel_size,
                                    dilation=dilation,
-                                   config_str=config_str,
-                                   memory_efficient=memory_efficient)
+                                   config_str=config_str)
             self.xvector.add_module('block%d' % (i + 1), block)
             channels = channels + num_layers * growth_rate
             self.xvector.add_module(
